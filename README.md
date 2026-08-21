@@ -27,7 +27,7 @@
 
 ## 快速使用
 
-1. 从 [Releases](https://github.com/v-49/qingyun-clicker/releases) 下载 `轻云连点器.exe`。
+1. 从 [Releases](https://github.com/v-49/qingyun-clicker/releases) 下载 `QingyunClicker-Windows-x64.exe`。
 2. 启动后确认 Windows UAC 提示。程序以管理员权限运行，便于向同样以管理员权限运行的目标程序发送输入。
 3. 点击左下角 `＋` 添加动作。
 4. 点击“未设置按键”，完成自定义录入。
