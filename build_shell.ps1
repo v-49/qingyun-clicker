@@ -27,7 +27,7 @@ if (-not (Test-Path -LiteralPath $iconPath)) {
     --uac-admin `
     --icon $iconPath `
     --add-data "$iconPath;." `
-    --name '连点器' `
+    --name '轻云连点器' `
     --distpath $outputPath `
     --workpath $buildPath `
     --specpath $projectRoot `

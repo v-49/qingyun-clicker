@@ -925,7 +925,7 @@ class ClickerShell(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("连点器")
+        self.setWindowTitle("轻云连点器")
         icon_path = resource_path("app.ico")
         if Path(icon_path).exists():
             self.setWindowIcon(QIcon(icon_path))
@@ -1255,7 +1255,7 @@ class ClickerShell(QMainWindow):
 
     def set_running_ui(self, running: bool) -> None:
         self.start_button.setText("停止" if running else "启动")
-        self.setWindowTitle(f"连点器 — {self.active_group.name}运行中" if running and self.active_group else "连点器")
+        self.setWindowTitle(f"轻云连点器 — {self.active_group.name}运行中" if running and self.active_group else "轻云连点器")
         for button in self.engine_buttons.values():
             button.setDisabled(running)
         self.target_button.setDisabled(running)
@@ -1323,7 +1323,7 @@ class ClickerShell(QMainWindow):
         self.activate_group(self.groups[max(0, min(active, len(self.groups) - 1))])
 
     def export_configuration(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(self, "导出动作配置", "连点器配置.json", "JSON 配置 (*.json)")
+        path, _ = QFileDialog.getSaveFileName(self, "导出动作配置", "轻云连点器配置.json", "JSON 配置 (*.json)")
         if not path:
             return
         Path(path).write_text(json.dumps(self.configuration_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1335,7 +1335,7 @@ class ClickerShell(QMainWindow):
         try:
             data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
             if not isinstance(data, dict) or data.get("version") != 1 or not isinstance(data.get("groups"), list):
-                raise ValueError("不是受支持的连点器配置文件")
+                raise ValueError("不是受支持的轻云连点器配置文件")
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             QMessageBox.critical(self, "导入失败", str(exc))
             return
@@ -1361,7 +1361,7 @@ def main() -> int:
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
     app = QApplication(sys.argv)
-    app.setApplicationName("连点器")
+    app.setApplicationName("轻云连点器")
     icon_path = resource_path("app.ico")
     if Path(icon_path).exists():
         app.setWindowIcon(QIcon(icon_path))

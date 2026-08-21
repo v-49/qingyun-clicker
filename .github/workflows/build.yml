@@ -8,8 +8,8 @@ jobs:
   test-and-build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Install dependencies
@@ -17,9 +17,9 @@ jobs:
       - name: Run tests
         run: python -m unittest -v test_product.py
       - name: Build EXE
-        shell: powershell
+        shell: pwsh
         run: .\build_shell.ps1
       - uses: actions/upload-artifact@v4
         with:
-          name: custom-input-clicker-windows
-          path: dist/连点器.exe
+          name: qingyun-clicker-windows
+          path: dist/轻云连点器.exe

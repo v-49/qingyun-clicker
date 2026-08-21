@@ -1,8 +1,10 @@
-# 支持自定义录入的连点器
+# 轻云连点器
 
-一个面向 Windows 10/11 的开源连点器。点击录入按钮后，直接按下键盘键、鼠标按钮或组合键，最后一次输入 1 秒后自动完成录入。
+> 轻盈如云，自由组合。
 
-[下载最新版 Windows EXE](https://github.com/v-49/custom-input-clicker/releases/latest)
+一个支持自定义录入的 Windows 10/11 开源连点器。点击录入按钮后，直接按下键盘键、鼠标按钮或组合键，最后一次输入 1 秒后自动完成录入。
+
+[下载最新版 Windows EXE](https://github.com/v-49/qingyun-clicker/releases/latest)
 
 ![主界面](docs/images/main-window.png)
 
@@ -23,13 +25,9 @@
 
 ![录入 Ctrl Shift Alt O 组合键](docs/images/capture-combo.png)
 
-鼠标按键也可以直接录入，并为不同动作分别设置触发间隔：
-
-![鼠标左右键动作](docs/images/mouse-actions.png)
-
 ## 快速使用
 
-1. 从 [Releases](https://github.com/v-49/custom-input-clicker/releases) 下载 `连点器.exe`。
+1. 从 [Releases](https://github.com/v-49/qingyun-clicker/releases) 下载 `轻云连点器.exe`。
 2. 启动后确认 Windows UAC 提示。程序以管理员权限运行，便于向同样以管理员权限运行的目标程序发送输入。
 3. 点击左下角 `＋` 添加动作。
 4. 点击“未设置按键”，完成自定义录入。
@@ -70,7 +68,7 @@ python -m venv .venv
 .\build_shell.ps1
 ```
 
-输出文件位于 `dist\连点器.exe`，并内置 `requireAdministrator` 清单，因此每次启动都会显示 UAC 确认。
+输出文件位于 `dist\轻云连点器.exe`，并内置 `requireAdministrator` 清单，因此每次启动都会显示 UAC 确认。
 
 ## 开源许可
 
