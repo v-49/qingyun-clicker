@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import ctypes
 import json
+import subprocess
 import sys
 from ctypes import wintypes
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QSettings, QSize, QTimer, Signal
-from PySide6.QtGui import QFont, QIcon, QKeyEvent, QMouseEvent
+from PySide6.QtGui import QFont, QFontMetricsF, QIcon, QIntValidator, QKeyEvent, QMouseEvent, QPainter, QPalette
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QApplication,
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -33,6 +35,7 @@ from PySide6.QtWidgets import (
 from ahk_engine import AhkRunner, find_ahk
 from models import ActionConfig, InputAtom, InputBinding
 from scheduler import NativeScheduler
+from shutdown_timer import ShutdownCountdown
 from wininput import (
     MOD_ALT,
     MOD_CONTROL,
@@ -48,63 +51,63 @@ from wininput import (
 
 APP_QSS = r"""
 QMainWindow, QWidget#root {
-    background: #f5f5f7;
-    color: #1d1d1f;
+    background: #faf9f6;
+    color: #292f29;
     font-family: "Microsoft YaHei UI";
     font-size: 14px;
 }
 
 QLabel#columnLabel, QLabel#engineLabel, QLabel#globalLabel {
-    color: #66666c;
+    color: #747a70;
     font-size: 13px;
     font-weight: 500;
 }
 
 QPushButton, QSpinBox {
     min-height: 32px;
-    border: 1px solid #c5c7cc;
+    border: 1px solid #e0e2d9;
     border-radius: 8px;
-    background: #ffffff;
-    color: #1d1d1f;
+    background: #fdfdfb;
+    color: #292f29;
     padding: 0 12px;
 }
 
 QPushButton:hover, QSpinBox:hover {
-    border-color: #a9a9ae;
-    background: #fbfbfc;
+    border-color: #bcc6b6;
+    background: #f5f6f0;
 }
 
 QPushButton:focus, QSpinBox:focus {
-    border: 1px solid #237d5a;
+    border: 1px solid #465e49;
 }
 
 QPushButton:disabled, QSpinBox:disabled {
-    color: #b4b4b8;
-    background: #ededf0;
-    border-color: #dedee2;
+    color: #a1a79c;
+    background: #eeefe9;
+    border-color: #e0e2d9;
 }
 
 QPushButton#primaryButton {
     min-width: 80px;
-    border-color: #167653;
-    background: #167653;
-    color: #ffffff;
+    border-color: #2c3c30;
+    background: #2c3c30;
+    color: #fdfdfb;
     font-size: 14px;
-    font-weight: 700;
+    font-weight: 600;
 }
 
 QPushButton#primaryButton:hover {
-    border-color: #115e42;
-    background: #115e42;
+    border-color: #223026;
+    background: #223026;
 }
 
 QPushButton#addButton {
     min-width: 32px;
     max-width: 32px;
-    border-color: #a9c9ba;
-    background: #edf7f2;
-    color: #126b4a;
-    font-weight: 700;
+    border-color: #c9d3c5;
+    background: #eef2e9;
+    color: #2c3c30;
+    font-weight: 600;
     padding: 0;
 }
 
@@ -117,19 +120,19 @@ QPushButton#quietButton, QPushButton#addGroupButton {
     min-height: 30px;
     border-color: transparent;
     background: transparent;
-    color: #646468;
+    color: #747a70;
     padding: 0 10px;
 }
 
 QPushButton#quietButton:hover, QPushButton#addGroupButton:hover {
     border-color: transparent;
-    background: #eaeaed;
-    color: #1d1d1f;
+    background: #eeede8;
+    color: #292f29;
 }
 
 QPushButton#hotkeyButton {
     min-width: 36px;
-    max-width: 36px;
+    max-width: 160px;
     text-align: center;
     padding: 0 3px;
 }
@@ -137,9 +140,9 @@ QPushButton#hotkeyButton {
 QFrame#engineSwitch {
     min-height: 32px;
     max-height: 32px;
-    border: 1px solid #c5c7cc;
+    border: 1px solid #e0e2d9;
     border-radius: 8px;
-    background: #ececef;
+    background: #eeede8;
 }
 
 QPushButton#engineOption {
@@ -148,51 +151,51 @@ QPushButton#engineOption {
     border: 0;
     border-radius: 7px;
     background: transparent;
-    color: #4d4d52;
+    color: #444d43;
     padding: 0 7px;
 }
 
 QPushButton#engineOption:hover:!checked {
     border: 0;
-    background: #e2e2e5;
+    background: #e4e5dd;
 }
 
 QPushButton#engineOption:checked {
     border: 0;
-    background: #ffffff;
-    color: #126b4a;
-    font-weight: 700;
+    background: #fdfdfb;
+    color: #2c3c30;
+    font-weight: 600;
 }
 
 QPushButton#targetWindowButton {
     width: 80px;
-    color: #126b4a;
+    color: #2c3c30;
 }
 
 QScrollArea#groupScroll {
-    border: 1px solid #b9bcc2;
-    border-radius: 4px;
-    background: #ffffff;
+    border: 1px solid #e0e2d9;
+    border-radius: 12px;
+    background: #fdfdfb;
 }
 
 QWidget#groupsPanel {
-    background: #ffffff;
+    background: #fdfdfb;
 }
 
 QFrame#groupFrame {
     border: 0;
-    border-bottom: 1px solid #d7d9dd;
-    background: #ffffff;
+    border-bottom: 1px solid #e0e2d9;
+    background: #fdfdfb;
 }
 
 QFrame#groupHeader {
     min-height: 42px;
     border: 0;
-    background: #fafafa;
+    background: #f1f2ed;
 }
 
 QFrame#groupFrame[active="true"] QFrame#groupHeader {
-    background: #f1f7f4;
+    background: #e9eee5;
 }
 
 QPushButton#groupToggle, QPushButton#groupName, QPushButton#groupDelete {
@@ -203,25 +206,25 @@ QPushButton#groupToggle, QPushButton#groupName, QPushButton#groupDelete {
 
 QPushButton#groupToggle {
     width: 28px;
-    color: #86868b;
+    color: #8a9384;
     padding: 0;
 }
 
 QPushButton#groupName {
-    color: #1d1d1f;
+    color: #292f29;
     font-size: 14px;
-    font-weight: 700;
+    font-weight: 600;
     text-align: left;
     padding: 0 2px;
 }
 
 QFrame#groupFrame[active="true"] QPushButton#groupName {
-    color: #126b4a;
+    color: #2c3c30;
 }
 
 QPushButton#groupDelete {
     width: 28px;
-    color: #9b9ba0;
+    color: #9ba397;
     font-size: 16px;
     padding: 0;
 }
@@ -233,13 +236,13 @@ QPushButton#groupDelete:hover {
 }
 
 QLabel#groupCount {
-    color: #737378;
+    color: #747a70;
     font-size: 13px;
     font-weight: 500;
 }
 
 QLabel#activeDot {
-    color: #167653;
+    color: #2c3c30;
     font-size: 15px;
 }
 
@@ -247,18 +250,18 @@ QLabel#emptyGroup {
     min-height: 62px;
     color: #7f7f85;
     font-weight: 500;
-    background: #ffffff;
+    background: #fdfdfb;
 }
 
 QFrame#actionRow {
     min-height: 52px;
     border: 0;
-    border-top: 1px solid #e7e7ea;
-    background: #ffffff;
+    border-top: 1px solid #e0e2d9;
+    background: #fdfdfb;
 }
 
 QLabel#dragHandle {
-    color: #b0b0b5;
+    color: #afb6a9;
     font-size: 14px;
 }
 
@@ -267,7 +270,7 @@ QPushButton#deleteAction {
     min-height: 24px;
     border-color: transparent;
     background: transparent;
-    color: #929297;
+    color: #929b8c;
     font-size: 17px;
     padding: 0;
 }
@@ -279,9 +282,9 @@ QPushButton#deleteAction:hover {
 }
 
 QWidget#executionControl {
-    border: 1px solid #c9cbd0;
+    border: 1px solid transparent;
     border-radius: 11px;
-    background: #f0f0f2;
+    background: #eeede8;
 }
 
 QPushButton#modeButton, QPushButton#stateButton {
@@ -294,61 +297,72 @@ QPushButton#modeButton, QPushButton#stateButton {
 }
 
 QPushButton#modeButton:hover {
-    background: #e5e5e8;
+    background: #e4e5dd;
 }
 
 QPushButton#modeButton:checked {
     border: 0;
-    background: #ffffff;
-    color: #126b4a;
-    font-weight: 700;
+    background: #fdfdfb;
+    color: #2c3c30;
+    font-weight: 600;
 }
 
 QPushButton#stateButton:checked {
-    border: 0;
-    background: #167653;
-    color: #ffffff;
-    font-weight: 700;
+    border: 1px solid #dce3e7;
+    background: #ebeff1;
+    color: #485863;
+    font-weight: 600;
 }
 
+QPushButton#stateButton:checked:hover {
+    background: #e1e8ec;
+    border-color: #c6d2da;
+}
+
+QPushButton#stateButton:checked:pressed {
+    background: #d6e0e6;
+    border-color: #b7c7d1;
+}
+
+QPushButton#stateButton:focus { border: 1px solid #7d939f; }
+
 QPushButton#stateButton:!checked {
-    color: #6e6e73;
-    background: #e0e0e4;
+    color: #747a70;
+    background: #d8dbd3;
 }
 
 QPushButton#recordButton {
     text-align: left;
-    color: #68686e;
+    color: #3d453d;
     font-weight: 500;
 }
 
 QFrame#intervalField {
     min-height: 32px;
     max-height: 32px;
-    border: 1px solid #c5c7cc;
+    border: 1px solid #e0e2d9;
     border-radius: 8px;
-    background: #ffffff;
+    background: #fdfdfb;
 }
 
 QFrame#intervalField:hover {
-    border-color: #a9a9ae;
-    background: #fbfbfc;
+    border-color: #bcc6b6;
+    background: #f5f6f0;
 }
 
 QFrame#intervalField:disabled {
-    border-color: #dedee2;
-    background: #ededf0;
+    border-color: #e0e2d9;
+    background: #eeefe9;
 }
 
 QSpinBox#intervalSpin {
-    min-width: 38px;
-    max-width: 38px;
+    min-width: 44px;
     min-height: 28px;
     border: 0;
     border-radius: 0;
     background: transparent;
     padding: 0;
-    selection-background-color: #167653;
+    selection-background-color: #2c3c30;
 }
 
 QSpinBox#intervalSpin:hover, QSpinBox#intervalSpin:focus {
@@ -357,7 +371,7 @@ QSpinBox#intervalSpin:hover, QSpinBox#intervalSpin:focus {
 }
 
 QLabel#intervalUnit {
-    color: #6e6e73;
+    color: #747a70;
     font-size: 12px;
     font-weight: 500;
 }
@@ -367,15 +381,15 @@ QLabel#intervalUnit:disabled {
 }
 
 QDialog#captureDialog {
-    background: #f5f5f7;
+    background: #faf9f6;
 }
 
 QLabel#capturePrompt {
     min-height: 76px;
-    border: 1px dashed #9bbbab;
+    border: 1px dashed #c9d3c5;
     border-radius: 10px;
-    background: #ffffff;
-    color: #315f4c;
+    background: #fdfdfb;
+    color: #2c3c30;
     font-size: 15px;
     font-weight: 600;
 }
@@ -389,11 +403,65 @@ QScrollBar:vertical {
 QScrollBar::handle:vertical {
     min-height: 34px;
     border-radius: 5px;
-    background: #b5b5ba;
+    background: #bec6b7;
 }
 
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
     height: 0;
+}
+QPushButton#shutdownButton {
+    background: #e9eee5;
+    color: #2c3c30;
+    border: 0;
+    border-radius: 10px;
+    padding: 0 10px;
+    font-weight: 600;
+}
+QPushButton#shutdownButton:hover { background: #dce5d7; }
+QPushButton#shutdownButton[active="true"] {
+    background: #fff0da;
+    color: #845019;
+}
+QPushButton#shutdownButton[active="true"]:hover { background: #ffe3b5; }
+QPushButton#shutdownButton:focus { border: 1px solid #465e49; }
+QPushButton:pressed { background: #e4e8dd; }
+QPushButton#primaryButton:pressed { background: #1c281f; }
+QFrame#groupHeader { background: #f1f2ed; }
+QFrame#groupFrame[active="true"] QFrame#groupHeader { background: #e9eee5; }
+QPushButton#recordButton { border-color: #e0e2d9; border-radius: 10px; }
+QPushButton#recordButton:focus { border-color: #465e49; }
+QPushButton#primaryButton { border-radius: 10px; }
+QLineEdit { selection-background-color: #2c3c30; selection-color: #fdfdfb; }
+QDialog#shutdownDialog { background: #faf9f6; }
+QLabel#durationTitle { font-size: 18px; font-weight: 600; color: #292f29; }
+QLabel#durationHint { color: #747a70; font-size: 12px; }
+QLineEdit#durationInput {
+    background: #fdfdfb; color: #292f29; font-size: 30px;
+    border: 1px solid #e0e2d9; border-radius: 10px; padding: 6px;
+    selection-background-color: #2c3c30;
+}
+QLineEdit#durationInput:focus { border-color: #2c3c30; }
+QLabel#durationUnit { font-size: 14px; color: #747a70; }
+QPushButton#primaryButton[launch="true"] {
+    background: #ebeff1;
+    color: #485863;
+    border: 1px solid #dce3e7;
+}
+QPushButton#primaryButton[launch="true"]:hover {
+    background: #e1e8ec;
+    border-color: #c6d2da;
+}
+QPushButton#primaryButton[launch="true"]:pressed {
+    background: #d6e0e6;
+    border-color: #b7c7d1;
+}
+QPushButton#primaryButton[launch="true"]:focus {
+    border-color: #7d939f;
+}
+QPushButton#primaryButton[launch="true"]:disabled {
+    background: #f0f2f3;
+    color: #9aa5ab;
+    border-color: #e3e8eb;
 }
 """
 
@@ -644,6 +712,111 @@ class DragHandle(QLabel):
         event.accept()
 
 
+class ShutdownDialog(QDialog):
+    """Direct hours/minutes entry without native spin arrows."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("定时关机")
+        self.setObjectName("shutdownDialog")
+        self.setFixedWidth(340)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 20)
+        layout.setSpacing(18)
+        title = QLabel("在这段时间后关机")
+        title.setObjectName("durationTitle")
+        layout.addWidget(title)
+        duration = QHBoxLayout()
+        duration.setSpacing(10)
+        self.hours = QLineEdit("0")
+        self.minutes = QLineEdit("30")
+        for edit, name, maximum in ((self.hours, "小时", 168), (self.minutes, "分钟", 59)):
+            edit.setObjectName("durationInput")
+            edit.setAccessibleName(name)
+            edit.setValidator(QIntValidator(0, maximum, edit))
+            edit.setMaxLength(3 if name == "小时" else 2)
+            edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            edit.setFixedWidth(76)
+            duration.addWidget(edit)
+            unit = QLabel(name)
+            unit.setObjectName("durationUnit")
+            duration.addWidget(unit)
+        duration.addStretch()
+        layout.addLayout(duration)
+        self.hint = QLabel("再次点击可取消，退出软件自动取消。")
+        self.hint.setObjectName("durationHint")
+        layout.addWidget(self.hint)
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        cancel = QPushButton("取消")
+        cancel.clicked.connect(self.reject)
+        self.confirm = QPushButton("开始计时")
+        self.confirm.setObjectName("primaryButton")
+        self.confirm.setDefault(True)
+        self.confirm.clicked.connect(self.accept)
+        buttons.addWidget(cancel)
+        buttons.addWidget(self.confirm)
+        layout.addLayout(buttons)
+        self.hours.textChanged.connect(self.validate_duration)
+        self.minutes.textChanged.connect(self.validate_duration)
+        self.minutes.setFocus()
+        self.minutes.selectAll()
+
+    def total_minutes(self):
+        return int(self.hours.text() or 0) * 60 + int(self.minutes.text() or 0)
+
+    def validate_duration(self):
+        valid = self.hours.hasAcceptableInput() and self.minutes.hasAcceptableInput() and 1 <= self.total_minutes() <= 10080
+        self.confirm.setEnabled(valid)
+        self.hint.setText("再次点击可取消，退出软件自动取消。" if valid else "请填写 1 分钟至 168 小时，分钟为 0–59。")
+
+    def accept(self):
+        self.validate_duration()
+        if self.confirm.isEnabled():
+            super().accept()
+
+
+class IntervalField(QFrame):
+    def mousePressEvent(self, event):
+        spin = self.findChild(QSpinBox)
+        if spin is not None and spin.isEnabled():
+            spin.setFocus()
+            spin.selectAll()
+        super().mousePressEvent(event)
+
+
+class IntervalEdit(QLineEdit):
+    """Native editing, with compact trailing zeros only when not editing."""
+
+    def paintEvent(self, event):
+        value = self.text()
+        if self.hasFocus() or len(value) < 3 or not value.endswith("00"):
+            super().paintEvent(event)
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        font = self.font()
+        small = QFont(font)
+        small.setPixelSize(max(9, round(QFontMetricsF(font).height() * 0.55)))
+        normal_metrics, small_metrics = QFontMetricsF(font), QFontMetricsF(small)
+        width = normal_metrics.horizontalAdvance(value[:-2]) + small_metrics.horizontalAdvance("00")
+        x = self.width() - width - 2
+        baseline = (self.height() - normal_metrics.height()) / 2 + normal_metrics.ascent()
+        painter.setPen(self.palette().color(QPalette.ColorGroup.Active if self.isEnabled() else QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text))
+        painter.setFont(font)
+        painter.drawText(int(x), int(baseline), value[:-2])
+        painter.setFont(small)
+        painter.drawText(int(x + normal_metrics.horizontalAdvance(value[:-2])), int(baseline), "00")
+
+
+class IntervalSpinBox(QSpinBox):
+    def __init__(self):
+        super().__init__()
+        self.setLineEdit(IntervalEdit())
+        self.setAccessibleName("动作间隔，毫秒")
+        self.setToolTip("1–99999 毫秒；点击编辑完整数字，末尾两个零在显示时缩小")
+
+
 class ActionRow(QFrame):
     def __init__(self, owner: "GroupWidget", data: dict | None = None) -> None:
         super().__init__()
@@ -698,24 +871,25 @@ class ActionRow(QFrame):
 
         self.record_button = QPushButton("未设置按键")
         self.record_button.setObjectName("recordButton")
-        self.record_button.setMinimumWidth(204)
+        self.record_button.setMinimumWidth(100)
         self.record_button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.record_button.clicked.connect(self.capture_binding)
         row.addWidget(self.record_button, 1)
 
-        self.interval_field = QFrame()
+        self.interval_field = IntervalField()
         self.interval_field.setObjectName("intervalField")
-        self.interval_field.setFixedWidth(72)
+        self.interval_field.setFixedWidth(78)
         interval_layout = QHBoxLayout(self.interval_field)
-        interval_layout.setContentsMargins(5, 1, 5, 1)
+        interval_layout.setContentsMargins(4, 1, 4, 1)
         interval_layout.setSpacing(2)
 
-        self.interval_spin = QSpinBox()
+        self.interval_spin = IntervalSpinBox()
         self.interval_spin.setObjectName("intervalSpin")
         self.interval_spin.setRange(1, 99999)
         self.interval_spin.setValue(150)
         self.interval_spin.setAlignment(Qt.AlignmentFlag.AlignRight)
         self.interval_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.interval_spin.valueChanged.connect(owner.window.schedule_save)
         interval_layout.addWidget(self.interval_spin)
 
         interval_unit = QLabel("ms")
@@ -923,13 +1097,13 @@ class ClickerShell(QMainWindow):
     HOTKEY_ID = 0xC11C
     WM_HOTKEY = 0x0312
 
-    def __init__(self) -> None:
+    def __init__(self, settings: QSettings | None = None) -> None:
         super().__init__()
         self.setWindowTitle("轻云连点器")
         icon_path = resource_path("app.ico")
         if Path(icon_path).exists():
             self.setWindowIcon(QIcon(icon_path))
-        self._settings = QSettings("Clicker", "Clicker")
+        self._settings = settings if settings is not None else QSettings("Clicker", "Clicker")
         self._loading = True
         self._registered_hotkey = False
         self._hotkey_hwnd = 0
@@ -948,11 +1122,15 @@ class ClickerShell(QMainWindow):
         self._save_timer.setSingleShot(True)
         self._save_timer.setInterval(250)
         self._save_timer.timeout.connect(self.save_configuration)
+        self.shutdown_countdown = ShutdownCountdown(execute=self.perform_shutdown)
+        self._shutdown_timer = QTimer(self)
+        self._shutdown_timer.setInterval(1000)
+        self._shutdown_timer.timeout.connect(self.update_shutdown)
 
-        self.setMinimumSize(QSize(506, 206))
+        self.setMinimumSize(QSize(660, 250))
         saved_geometry = self._settings.value("window/geometry")
         if saved_geometry is None or not self.restoreGeometry(saved_geometry):
-            self.resize(520, 238)
+            self.resize(740, 420)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         self.groups: list[GroupWidget] = []
@@ -1001,7 +1179,7 @@ class ClickerShell(QMainWindow):
         heading.addStretch(1)
         interval_label = QLabel("间隔")
         interval_label.setObjectName("columnLabel")
-        interval_label.setFixedWidth(72)
+        interval_label.setFixedWidth(78)
         interval_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         heading.addWidget(interval_label)
         main.addLayout(heading)
@@ -1044,18 +1222,27 @@ class ClickerShell(QMainWindow):
         controls.addWidget(self.export_button)
         controls.addStretch(1)
 
-        global_label = QLabel("全局启动/停止")
+        self.shutdown_button = QPushButton("定时关机")
+        self.shutdown_button.setObjectName("shutdownButton")
+        self.shutdown_button.setMinimumWidth(128)
+        self.shutdown_button.setToolTip("设置多少分钟后关机；再次点击取消，退出软件也会取消")
+        self.shutdown_button.clicked.connect(self.toggle_shutdown)
+        controls.addWidget(self.shutdown_button)
+        controls.addStretch(1)
+
+        global_label = QLabel("快捷键")
         global_label.setObjectName("globalLabel")
         controls.addWidget(global_label)
         self.hotkey_button = QPushButton("F8")
         self.hotkey_button.setObjectName("hotkeyButton")
-        self.hotkey_button.setFixedWidth(36)
+        self.hotkey_button.setFixedWidth(72)
         self.hotkey_button.setToolTip("点击后录入新的全局启动/停止按键")
         self.hotkey_button.clicked.connect(self.capture_global_hotkey)
         controls.addWidget(self.hotkey_button)
 
         self.start_button = QPushButton("启动")
         self.start_button.setObjectName("primaryButton")
+        self.start_button.setProperty("launch", True)
         self.start_button.clicked.connect(self.toggle_execution)
         controls.addWidget(self.start_button)
         main.addLayout(controls)
@@ -1069,6 +1256,39 @@ class ClickerShell(QMainWindow):
         if not self._hotkey_registration_scheduled:
             self._hotkey_registration_scheduled = True
             QTimer.singleShot(100, self._register_global_hotkey)
+
+    def toggle_shutdown(self) -> None:
+        if self.shutdown_countdown.active:
+            self.shutdown_countdown.cancel()
+            self.update_shutdown()
+            return
+        dialog = ShutdownDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.shutdown_countdown.start(dialog.total_minutes())
+            self._shutdown_timer.start()
+            self.update_shutdown()
+
+    def perform_shutdown(self) -> None:
+        from shutdown_timer import shutdown_windows
+        self.stop_execution()
+        self.save_configuration()
+        shutdown_windows()
+
+    def update_shutdown(self) -> None:
+        try:
+            self.shutdown_countdown.tick()
+        except (OSError, subprocess.SubprocessError) as exc:
+            QMessageBox.warning(self, "关机未完成", str(exc))
+        active = self.shutdown_countdown.active
+        if active:
+            minutes, seconds = divmod(self.shutdown_countdown.remaining, 60)
+            self.shutdown_button.setText(f"取消 · {minutes:02d}:{seconds:02d}")
+        else:
+            self._shutdown_timer.stop()
+            self.shutdown_button.setText("定时关机")
+        self.shutdown_button.setProperty("active", active)
+        self.shutdown_button.style().unpolish(self.shutdown_button)
+        self.shutdown_button.style().polish(self.shutdown_button)
 
     def set_input_mode(self, mode: str) -> None:
         self.input_mode = mode
@@ -1292,6 +1512,8 @@ class ClickerShell(QMainWindow):
             data = json.loads(raw) if raw else {}
         except json.JSONDecodeError:
             data = {}
+        if not isinstance(data, dict):
+            data = {}
         self.apply_configuration(data, replace=True)
 
     def apply_configuration(self, data: dict, replace: bool) -> None:
@@ -1349,6 +1571,8 @@ class ClickerShell(QMainWindow):
         pass
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt API naming
+        self.shutdown_countdown.cancel()
+        self._shutdown_timer.stop()
         self.stop_execution()
         self._unregister_global_hotkey()
         self._settings.setValue("window/geometry", self.saveGeometry())
@@ -1370,6 +1594,32 @@ def main() -> int:
     app_font.setHintingPreference(QFont.HintingPreference.PreferFullHinting)
     app.setFont(app_font)
     app.setStyleSheet(APP_QSS)
+    if len(sys.argv) == 3 and sys.argv[1] == "--smoke-test":
+        import tempfile
+        report = Path(sys.argv[2]).resolve()
+        with tempfile.TemporaryDirectory(prefix="clicker_smoke_") as temporary:
+            settings = QSettings(str(Path(temporary) / "settings.ini"), QSettings.Format.IniFormat)
+            window = ClickerShell(settings=settings)
+            window._hotkey_registration_scheduled = True
+            window.groups[0].add_action()
+            window.groups[0].actions[0].interval_spin.setValue(2000)
+            window.show()
+
+            def finish_smoke():
+                try:
+                    assert window.isVisible()
+                    assert window.groups[0].actions[0].interval_spin.value() == 2000
+                    assert window.shutdown_button.text() == "定时关机"
+                    assert window.grab().save(str(report.with_suffix(".png")))
+                    report.write_text(json.dumps({"ok": True, "platform": app.platformName(), "frozen": bool(getattr(sys, "frozen", False)), "size": [window.width(), window.height()] }), encoding="utf-8")
+                    window.close()
+                    app.exit(0)
+                except Exception as exc:
+                    report.write_text(json.dumps({"ok": False, "error": str(exc)}), encoding="utf-8")
+                    app.exit(1)
+
+            QTimer.singleShot(700, finish_smoke)
+            return app.exec()
     window = ClickerShell()
     window.show()
     return app.exec()

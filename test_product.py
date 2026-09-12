@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import os
 import time
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, Qt
+from PySide6.QtCore import QEvent, Qt, QSettings
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import QApplication, QDialog
 
@@ -19,6 +20,17 @@ from scheduler import NativeScheduler
 
 
 APP = QApplication.instance() or QApplication([])
+TEST_SETTINGS = tempfile.TemporaryDirectory(prefix="clicker_tests_")
+SETTINGS_PATCH = patch("main.QSettings", side_effect=lambda *args: QSettings(str(Path(TEST_SETTINGS.name) / "test.ini"), QSettings.Format.IniFormat))
+
+
+def setUpModule():
+    SETTINGS_PATCH.start()
+
+
+def tearDownModule():
+    SETTINGS_PATCH.stop()
+    TEST_SETTINGS.cleanup()
 
 
 class ModelTests(unittest.TestCase):

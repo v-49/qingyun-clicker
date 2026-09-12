@@ -15,7 +15,7 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements-dev.txt
       - name: Run tests
-        run: python -m unittest -v test_product.py
+        run: python -m unittest -v
       - name: Build EXE
         shell: pwsh
         run: .\build_shell.ps1
