@@ -18,6 +18,7 @@ def main():
         env = {k: v for k, v in os.environ.items() if not k.upper().startswith(('PYTHON', 'QT_'))}
         env['PATH'] = str(Path(os.environ['SystemRoot']) / 'System32')
         env['__COMPAT_LAYER'] = 'RunAsInvoker'
+        env['QINGYUN_TEST_CACHE'] = str(Path(directory) / 'cache')
         startup = subprocess.STARTUPINFO()
         startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         startup.wShowWindow = 0

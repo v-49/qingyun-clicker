@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import ctypes
 import json
+import os
 import subprocess
 import sys
+import time
 from ctypes import wintypes
 from pathlib import Path
 
@@ -23,6 +25,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -1132,6 +1135,9 @@ class ClickerShell(QMainWindow):
         if saved_geometry is None or not self.restoreGeometry(saved_geometry):
             self.resize(740, 420)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        if os.environ.get("QINGYUN_RUNTIME_CACHE"):
+            self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            self.customContextMenuRequested.connect(self.show_cache_menu)
 
         self.groups: list[GroupWidget] = []
         self.active_group: GroupWidget | None = None
@@ -1250,6 +1256,23 @@ class ClickerShell(QMainWindow):
         self.load_configuration()
         self._loading = False
         self.setFocus()
+
+    def show_cache_menu(self, position):
+        menu = QMenu(self)
+        folder = menu.addAction("打开运行缓存目录")
+        clear = menu.addAction("清理运行缓存并退出")
+        chosen = menu.exec(self.mapToGlobal(position))
+        if chosen == folder:
+            os.startfile(os.environ["QINGYUN_RUNTIME_CACHE"])
+        elif chosen == clear:
+            launcher = os.environ.get("QINGYUN_LAUNCHER_PATH")
+            wrapper = os.environ.get("QINGYUN_WRAPPER_PID")
+            if launcher and wrapper:
+                try:
+                    subprocess.Popen([launcher, "--clear-cache-after", wrapper], creationflags=subprocess.CREATE_NO_WINDOW)
+                    self.close()
+                except OSError as exc:
+                    QMessageBox.warning(self, "无法清理缓存", str(exc))
 
     def showEvent(self, event) -> None:  # noqa: N802 - Qt API naming
         super().showEvent(event)
@@ -1604,6 +1627,7 @@ def main() -> int:
             window.groups[0].add_action()
             window.groups[0].actions[0].interval_spin.setValue(2000)
             window.show()
+            ready_at = time.perf_counter()
 
             def finish_smoke():
                 try:
@@ -1611,7 +1635,7 @@ def main() -> int:
                     assert window.groups[0].actions[0].interval_spin.value() == 2000
                     assert window.shutdown_button.text() == "定时关机"
                     assert window.grab().save(str(report.with_suffix(".png")))
-                    report.write_text(json.dumps({"ok": True, "platform": app.platformName(), "frozen": bool(getattr(sys, "frozen", False)), "size": [window.width(), window.height()] }), encoding="utf-8")
+                    report.write_text(json.dumps({"ok": True, "platform": app.platformName(), "frozen": bool(getattr(sys, "frozen", False)), "size": [window.width(), window.height()], "ready_perf_counter": ready_at }), encoding="utf-8")
                     window.close()
                     app.exit(0)
                 except Exception as exc:

@@ -115,6 +115,7 @@ class InterfaceTests(unittest.TestCase):
         dialog.minutes.setText("15")
         self.assertEqual(dialog.total_minutes(), 135)
         self.assertTrue(dialog.confirm.isEnabled())
+
         for hours, minutes in (("0", "0"), ("168", "1"), ("0", "60")):
             dialog.hours.setText(hours)
             dialog.minutes.setText(minutes)
@@ -122,6 +123,17 @@ class InterfaceTests(unittest.TestCase):
         dialog.hours.setText("168")
         dialog.minutes.setText("0")
         self.assertTrue(dialog.confirm.isEnabled())
+
+    def test_cache_cleanup_launches_helper_before_closing(self):
+        clear = Mock()
+        with patch.dict(os.environ, {"QINGYUN_LAUNCHER_PATH": "C:/test/Clicker.exe", "QINGYUN_WRAPPER_PID": "123"}), patch("main.QMenu") as menu, patch("main.subprocess.Popen") as spawn, patch.object(self.window, "close") as close:
+            menu.return_value.addAction.side_effect = [Mock(), clear]
+            menu.return_value.exec.return_value = clear
+            from PySide6.QtCore import QPoint
+            self.window.show_cache_menu(QPoint(0, 0))
+            self.assertEqual(spawn.call_args.args[0], ["C:/test/Clicker.exe", "--clear-cache-after", "123"])
+            close.assert_called_once()
+
 
 
 if __name__ == "__main__":

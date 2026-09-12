@@ -29,22 +29,14 @@ if (-not (Test-Path -LiteralPath $pythonPath)) {
 $pythonBase = & $pythonPath -c 'import sys; print(sys.base_prefix)'
 try {
     $env:PATH = @((Split-Path -Parent $pythonPath), $pythonBase, (Join-Path $pythonBase 'DLLs'), (Join-Path $env:SystemRoot 'System32'), $env:SystemRoot) -join ';'
-    & $pyinstallerCommand `
-    --noconfirm `
-    --clean `
-    --onefile `
-    --windowed `
-    --uac-admin `
-    --icon $iconPath `
-    --add-data "$iconPath;." `
-    --name '轻云连点器' `
-    --distpath $outputPath `
-    --workpath $buildPath `
-    --specpath $projectRoot `
-    $entryPath
+    & $pyinstallerCommand --noconfirm --clean --distpath $outputPath --workpath $buildPath (Join-Path $projectRoot 'clicker.spec')
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed with exit code $LASTEXITCODE" }
+    & $pythonPath (Join-Path $projectRoot 'build_cached_launcher.py')
+    if ($LASTEXITCODE -ne 0) { throw 'Cached launcher build failed.' }
     & $pythonPath (Join-Path $projectRoot 'packaged_smoke.py') (Join-Path $outputPath '轻云连点器.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Packaged application failed its startup test.' }
+    & $pythonPath (Join-Path $projectRoot 'cache_smoke.py') (Join-Path $outputPath '轻云连点器.exe')
+    if ($LASTEXITCODE -ne 0) { throw 'Cached launcher failed its integration tests.' }
 }
 finally {
     $env:PATH = $originalBuildPath
