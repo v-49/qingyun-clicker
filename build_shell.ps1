@@ -33,9 +33,11 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed with exit code $LASTEXITCODE" }
     & $pythonPath (Join-Path $projectRoot 'build_cached_launcher.py')
     if ($LASTEXITCODE -ne 0) { throw 'Cached launcher build failed.' }
-    & $pythonPath (Join-Path $projectRoot 'packaged_smoke.py') (Join-Path $outputPath '轻云连点器.exe')
+    $executableName = & $pythonPath -c 'from app_version import EXE_NAME; print(EXE_NAME)'
+    $executablePath = Join-Path $outputPath $executableName
+    & $pythonPath (Join-Path $projectRoot 'packaged_smoke.py') $executablePath
     if ($LASTEXITCODE -ne 0) { throw 'Packaged application failed its startup test.' }
-    & $pythonPath (Join-Path $projectRoot 'cache_smoke.py') (Join-Path $outputPath '轻云连点器.exe')
+    & $pythonPath (Join-Path $projectRoot 'cache_smoke.py') $executablePath
     if ($LASTEXITCODE -ne 0) { throw 'Cached launcher failed its integration tests.' }
 }
 finally {

@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>轻云连点器 — 内测 v2.0 beta</title>
+  <link rel="icon" href="assets/qingyun.png">
+  <link rel="stylesheet" href="style.css?v=beta-50">
+  <script defer src="model.js?v=beta-50"></script>
+  <script defer src="app.js?v=beta-50"></script>
+</head>
+<body>
+  <main class="window" aria-label="轻云连点器">
+    <header class="titlebar"><img src="assets/qingyun.png" alt=""><span>轻云连点器</span><span class="title-version">内测 v2.0 beta</span></header>
+    <div class="app-inner">
+      <div id="topline"></div>
+      <div id="workspace" class="workspace"></div>
+      <div id="footer"></div>
+    </div>
+  </main>
+  <span id="status-message" class="sr-only" role="status" aria-live="polite"></span>
+  <dialog id="editor-dialog" class="small-dialog"></dialog>
+  <input id="import-file" type="file" accept="application/json,.json" hidden>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

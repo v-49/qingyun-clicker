@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import json
+import math
 import os
 import subprocess
 import sys
@@ -11,15 +12,20 @@ import time
 from ctypes import wintypes
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, QSettings, QSize, QTimer, Signal
-from PySide6.QtGui import QFont, QFontMetricsF, QIcon, QIntValidator, QKeyEvent, QMouseEvent, QPainter, QPalette
+from PySide6.QtCore import QObject, Qt, QSettings, QSignalBlocker, QSize, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QIcon, QIntValidator, QKeyEvent, QMouseEvent, QPainter, QPalette, QPen
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QApplication,
     QButtonGroup,
+    QCheckBox,
+    QComboBox,
     QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFrame,
+    QFormLayout,
+    QGridLayout,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -36,8 +42,12 @@ from PySide6.QtWidgets import (
 )
 
 from ahk_engine import AhkRunner, find_ahk
-from models import ActionConfig, InputAtom, InputBinding
-from scheduler import NativeScheduler
+from app_version import APP_NAME, APP_TITLE, APP_VERSION
+from models import DEFAULT_PRESS_MS, ActionConfig, InputAtom, InputBinding
+from input_names import VK_NAMES, MOUSE_NAMES, atom_name, binding_name, binding_display
+from recording_models import RecordedSequence
+from recorder import NativeRecorder, RECORDING_START_DELAY_SECONDS
+from scheduler import NativeScheduler, validate_actions, find_overlaps
 from shutdown_timer import ShutdownCountdown
 from wininput import (
     MOD_ALT,
@@ -45,6 +55,7 @@ from wininput import (
     MOD_SHIFT,
     MOD_WIN,
     WindowInfo,
+    binding_atoms,
     is_window,
     register_hotkey,
     unregister_hotkey,
@@ -466,6 +477,48 @@ QPushButton#primaryButton[launch="true"]:disabled {
     color: #9aa5ab;
     border-color: #e3e8eb;
 }
+QWidget#executionControl:disabled { background: #eeefe9; }
+QPushButton#modeButton:disabled, QPushButton#stateButton:disabled,
+QPushButton#modeButton:disabled:checked, QPushButton#stateButton:disabled:checked {
+    color: #a1a79c; background: transparent; border: 0; font-weight: 400;
+}
+QPushButton#bindButton {
+    min-height: 30px; padding: 0; font-size: 12px; color: #747a70;
+    border-color: #e0e2d9; background: #fdfdfb;
+}
+QPushButton#bindButton[bound="true"] {
+    color: #485863; background: #ebeff1; border-color: #c6d2da; font-weight: 600;
+}
+QPushButton#bindButton:hover { border-color: #7d939f; }
+QPushButton#bindButton:disabled { color: #a1a79c; background: #eeefe9; }
+QPushButton#recordButton:disabled { color: #a1a79c; background: #eeefe9; }
+QDialog#bindingEditor { background: #faf9f6; }
+QDialog#sequenceEditor { background: #faf9f6; }
+QDialog#sequenceEditor QTableWidget { background: #fdfdfb; border: 1px solid #dfe2d8; gridline-color: #e6e8df; selection-background-color: #e8eeeb; selection-color: #292f29; }
+QDialog#sequenceEditor QTableWidget::item { border: none; padding-left: 5px; }
+QDialog#sequenceEditor QTableWidget::item:selected { background: #e8eeeb; color: #292f29; border: none; }
+QDialog#sequenceEditor QHeaderView::section { background: #e9eee3; border: 0; border-bottom: 1px solid #dfe2d8; padding: 7px; color: #444d43; }
+QDialog#sequenceEditor QLabel#bindingPreview { color: #485863; font-size: 12px; }
+QDialog#bindingEditor QLabel { color: #444d43; }
+QDialog#bindingEditor QLabel:disabled { color: #a1a79c; }
+QComboBox#bindingMode {
+    min-height: 32px; padding: 0 10px; border: 1px solid #e0e2d9;
+    border-radius: 8px; background: #fdfdfb; color: #292f29;
+}
+QComboBox#bindingMode:focus { border-color: #465e49; }
+QComboBox#bindingMode:disabled { color: #a1a79c; background: #eeefe9; }
+QComboBox#bindingMode::drop-down { border: 0; width: 28px; }
+QComboBox#bindingMode::down-arrow { image: none; }
+QComboBox#bindingMode QAbstractItemView {
+    background: #fdfdfb; color: #292f29; selection-background-color: #e9eee5;
+    selection-color: #292f29; border: 1px solid #c9d3c5;
+}
+QPushButton#captureField { text-align: left; padding: 0 10px; }
+QPushButton#captureField[capturing="true"] {
+    border-color: #465e49; background: #eef2e9; color: #2c3c30;
+}
+QDialog#bindingEditor QLabel#bindingError { color: #aa352e; font-size: 12px; }
+QDialog#bindingEditor QLabel#bindingPreview { color: #485863; font-size: 12px; }
 """
 
 
@@ -474,13 +527,6 @@ def resource_path(filename: str) -> str:
     return str(base / filename)
 
 
-VK_NAMES = {
-    0x08: "Backspace", 0x09: "Tab", 0x0D: "Enter", 0x1B: "Esc", 0x20: "Space",
-    0x21: "Page Up", 0x22: "Page Down", 0x23: "End", 0x24: "Home",
-    0x25: "←", 0x26: "↑", 0x27: "→", 0x28: "↓", 0x2D: "Insert", 0x2E: "Delete",
-    0x10: "Shift", 0x11: "Ctrl", 0x12: "Alt", 0x5B: "Win",
-}
-MOUSE_NAMES = {"left": "鼠标左键", "right": "鼠标右键", "middle": "鼠标中键", "x1": "鼠标侧键1", "x2": "鼠标侧键2"}
 QT_KEY_TO_VK = {
     Qt.Key.Key_Backspace: 0x08,
     Qt.Key.Key_Tab: 0x09,
@@ -540,79 +586,12 @@ def vk_from_event(event: QKeyEvent) -> int:
     return QT_KEY_TO_VK.get(Qt.Key(key), 0)
 
 
-def atom_name(kind: str, code: int | str) -> str:
-    if kind == "mouse":
-        return MOUSE_NAMES[str(code)]
-    vk = int(code)
-    if 0x41 <= vk <= 0x5A or 0x30 <= vk <= 0x39:
-        return chr(vk)
-    if 0x70 <= vk <= 0x87:
-        return f"F{vk - 0x6F}"
-    return VK_NAMES.get(vk, f"VK {vk:02X}")
-
-
-def binding_name(
-    kind: str,
-    code: int | str,
-    modifiers: int = 0,
-    additional: tuple[InputAtom, ...] = (),
-) -> str:
-    prefixes = []
-    if modifiers & MOD_CONTROL:
-        prefixes.append("Ctrl")
-    if modifiers & MOD_SHIFT:
-        prefixes.append("Shift")
-    if modifiers & MOD_ALT:
-        prefixes.append("Alt")
-    if modifiers & MOD_WIN:
-        prefixes.append("Win")
-    names = [atom_name(kind, code), *(atom_name(atom.kind, atom.code) for atom in additional)]
-    return "+".join([*prefixes, *names])
-
-
-def binding_display(binding: InputBinding) -> str:
-    return binding.display or binding_name(binding.kind, binding.code, binding.modifiers, binding.additional)
-
-
-class CaptureDialog(QDialog):
-    def __init__(self, parent: QWidget, allow_mouse: bool, title: str) -> None:
-        super().__init__(parent)
-        self.allow_mouse = allow_mouse
-        self.binding: InputBinding | None = None
+class InputCaptureMixin:
+    """Shared keyboard/mouse parsing for the original dialog and inline fields."""
+    def reset_inputs(self) -> None:
         self._atoms: list[InputAtom] = []
         self._modifier_atoms: list[InputAtom] = []
         self._modifier_flags = 0
-        self._finish_timer = QTimer(self)
-        self._finish_timer.setSingleShot(True)
-        self._finish_timer.setInterval(1000)
-        self._finish_timer.timeout.connect(self._finish_capture)
-        self.setObjectName("captureDialog")
-        self.setWindowTitle(title)
-        self.setModal(True)
-        self.setFixedSize(410, 142)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
-        prompt = "请按下一个或多个键盘按键/鼠标按钮\n最后一次输入 1 秒后自动完成 · Esc 取消" if allow_mouse else "请按下新的键盘快捷键\n最后一次输入 1 秒后自动完成 · Esc 取消"
-        self.prompt_label = QLabel(prompt)
-        self.prompt_label.setObjectName("capturePrompt")
-        self.prompt_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.prompt_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        layout.addWidget(self.prompt_label)
-
-    def showEvent(self, event) -> None:  # noqa: N802
-        super().showEvent(event)
-        self.activateWindow()
-        self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
-        self.grabKeyboard()
-        if self.allow_mouse:
-            self.grabMouse()
-
-    def done(self, result: int) -> None:
-        self._finish_timer.stop()
-        self.releaseKeyboard()
-        if self.allow_mouse:
-            self.releaseMouse()
-        super().done(result)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
         if event.isAutoRepeat():
@@ -667,6 +646,45 @@ class CaptureDialog(QDialog):
             return None
         return InputBinding(binding.kind, binding.code, binding.modifiers, binding_display(binding), binding.additional)
 
+
+class CaptureDialog(InputCaptureMixin, QDialog):
+    def __init__(self, parent: QWidget, allow_mouse: bool, title: str) -> None:
+        super().__init__(parent)
+        self.allow_mouse = allow_mouse
+        self.binding: InputBinding | None = None
+        self.reset_inputs()
+        self._finish_timer = QTimer(self)
+        self._finish_timer.setSingleShot(True)
+        self._finish_timer.setInterval(1000)
+        self._finish_timer.timeout.connect(self._finish_capture)
+        self.setObjectName("captureDialog")
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.setFixedSize(410, 142)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        prompt = "请按下一个或多个键盘按键/鼠标按钮\n最后一次输入 1 秒后自动完成 · Esc 取消" if allow_mouse else "请按下新的键盘快捷键\n最后一次输入 1 秒后自动完成 · Esc 取消"
+        self.prompt_label = QLabel(prompt)
+        self.prompt_label.setObjectName("capturePrompt")
+        self.prompt_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.prompt_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        layout.addWidget(self.prompt_label)
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self.activateWindow()
+        self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
+        self.grabKeyboard()
+        if self.allow_mouse:
+            self.grabMouse()
+
+    def done(self, result: int) -> None:
+        self._finish_timer.stop()
+        self.releaseKeyboard()
+        if self.allow_mouse:
+            self.releaseMouse()
+        super().done(result)
+
     def _capture_changed(self) -> None:
         preview = self._current_binding()
         if preview is None:
@@ -680,8 +698,101 @@ class CaptureDialog(QDialog):
             self.accept()
 
 
+class BindingCaptureButton(InputCaptureMixin, QPushButton):
+    bindingCaptured = Signal(object)
+    captureStateChanged = Signal(bool)
+
+    def __init__(self, binding: InputBinding | None, *, single: bool) -> None:
+        super().__init__()
+        self.binding, self.single = binding, single
+        self.allow_mouse, self.capturing = True, False
+        self.reset_inputs()
+        self.setObjectName("captureField")
+        self.setAutoDefault(False)
+        self.setToolTip("点击后按下键盘键或鼠标按钮；Esc 取消录入")
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._finish_timer = QTimer(self)
+        self._finish_timer.setSingleShot(True)
+        self._finish_timer.setInterval(1000)
+        self._finish_timer.timeout.connect(self._finish_capture)
+        self.clicked.connect(self.begin_capture)
+        self.set_binding(binding)
+
+    def set_binding(self, binding: InputBinding | None) -> None:
+        self.binding = binding
+        self.setText(binding_display(binding) if binding else "点击录入触发键" if self.single else "点击录入输出")
+
+    def begin_capture(self) -> None:
+        if self.capturing:
+            return
+        self.reset_inputs()
+        self.capturing = True
+        self.setProperty("capturing", True)
+        self.style().unpolish(self); self.style().polish(self)
+        self.setText("请按下触发键 · Esc 取消" if self.single else "请按下输出键 · Esc 取消")
+        self.setFocus(Qt.FocusReason.OtherFocusReason)
+        self.grabKeyboard(); self.grabMouse()
+        self.captureStateChanged.emit(True)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
+        if self.capturing:
+            if event.key() == Qt.Key.Key_Escape and event.modifiers() == Qt.KeyboardModifier.NoModifier:
+                self.reject()
+            else:
+                InputCaptureMixin.keyPressEvent(self, event)
+        else:
+            QPushButton.keyPressEvent(self, event)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if self.capturing:
+            InputCaptureMixin.mousePressEvent(self, event)
+        else:
+            QPushButton.mousePressEvent(self, event)
+
+    def _capture_changed(self) -> None:
+        preview = self._current_binding()
+        if preview is None:
+            return
+        if self.single and self._atoms:
+            self._finish_capture()
+        else:
+            self.setText(f"{preview.display} · 1 秒后完成")
+            self._finish_timer.start()
+
+    def reject(self) -> None:
+        self._finish_timer.stop()
+        if not self.capturing:
+            return
+        self.capturing = False
+        if QWidget.keyboardGrabber() is self:
+            self.releaseKeyboard()
+        if QWidget.mouseGrabber() is self:
+            self.releaseMouse()
+        self.setProperty("capturing", False)
+        self.style().unpolish(self); self.style().polish(self)
+        self.set_binding(self.binding)
+        self.captureStateChanged.emit(False)
+
+    def _finish_capture(self) -> None:
+        binding = self._current_binding()
+        if self.single and not self._atoms and self._modifier_atoms:
+            primary = self._modifier_atoms[-1]
+            flags = {vk: flag for vk, flag in MODIFIER_KEY_BINDINGS.values()}
+            modifiers = self._modifier_flags & ~flags[primary.code]
+            binding = InputBinding(primary.kind, primary.code, modifiers)
+        if binding is None:
+            self.reject()
+            return
+        self.reject()
+        self.set_binding(binding)
+        self.bindingCaptured.emit(binding)
+
+
 class UiBridge(QObject):
     execution_error = Signal(str)
+    execution_stopped = Signal()
+    recording_finished = Signal()
+    recording_error = Signal(str)
 
 
 class DragHandle(QLabel):
@@ -820,11 +931,294 @@ class IntervalSpinBox(QSpinBox):
         self.setToolTip("1–99999 毫秒；点击编辑完整数字，末尾两个零在显示时缩小")
 
 
+def press_duration_field(value: int = DEFAULT_PRESS_MS) -> tuple[IntervalField, IntervalSpinBox]:
+    field = IntervalField()
+    field.setObjectName("intervalField")
+    field.setFixedWidth(112)
+    layout = QHBoxLayout(field)
+    layout.setContentsMargins(4, 1, 4, 1)
+    layout.setSpacing(2)
+    label = QLabel("持续")
+    label.setObjectName("intervalUnit")
+    layout.addWidget(label)
+    spin = IntervalSpinBox()
+    spin.setObjectName("intervalSpin")
+    spin.setRange(0, 99999)
+    spin.setValue(value)
+    spin.setAlignment(Qt.AlignmentFlag.AlignRight)
+    spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+    spin.setAccessibleName("按下时长，毫秒")
+    spin.setToolTip("0 毫秒为按下后立即松开；持续按住模式不使用此值")
+    layout.addWidget(spin)
+    unit = QLabel("ms")
+    unit.setObjectName("intervalUnit")
+    layout.addWidget(unit)
+    return field, spin
+
+
+class BindingModeCombo(QComboBox):
+    def paintEvent(self, event) -> None:  # noqa: N802
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor("#747a70"), 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        x, y = self.width() - 18, self.height() // 2
+        painter.drawLine(x - 4, y - 2, x, y + 2)
+        painter.drawLine(x, y + 2, x + 4, y - 2)
+        painter.end()
+
+
+class ActionEditor(QDialog):
+    """Configure a binding atomically without moving controls between modes."""
+    def __init__(self, row: "ActionRow") -> None:
+        super().__init__(row)
+        self.row = row
+        self.binding, self.trigger = row.binding, row.trigger
+        self.sequence = row.sequence
+        self._unbinding = False
+        self._error_message = ""
+        self.setObjectName("bindingEditor")
+        self.setWindowTitle("绑定按键")
+        self.setModal(True)
+        self.setFixedWidth(480)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(10)
+        form = QFormLayout()
+        form.setSpacing(10)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        layout.addLayout(form)
+        self.trigger_button = BindingCaptureButton(self.trigger, single=True)
+        self.trigger_button.setAccessibleName("录入触发键")
+        self.trigger_button.bindingCaptured.connect(self.set_trigger)
+        self.trigger_button.captureStateChanged.connect(self.refresh)
+        form.addRow("触发键", self.trigger_button)
+        self.output_button = BindingCaptureButton(self.binding, single=False)
+        self.output_button.setAccessibleName("录入输出按键或组合")
+        self.output_button.bindingCaptured.connect(self.set_output)
+        self.output_button.captureStateChanged.connect(self.refresh)
+        if self.sequence:
+            self.output_button.setText(self.sequence.name)
+            self.output_button.setDisabled(True)
+        form.addRow("输出", self.output_button)
+        self.mode = BindingModeCombo()
+        self.mode.setObjectName("bindingMode")
+        modes = (("按住循环", "repeat"), ("指定次数", "burst"), ("单次", "single")) if self.sequence else (("跟随按住", "hold"), ("按住连发", "repeat"), ("短连发", "burst"), ("单次", "single"))
+        for label, value in modes:
+            self.mode.addItem(label, value)
+        selected = "single" if row.execution_mode == "burst" and row.repeat_count == 1 else row.execution_mode
+        self.mode.setCurrentIndex(max(0, self.mode.findData(selected if self.trigger else "single" if self.sequence else "hold")))
+        self.mode_label = QLabel("执行方式")
+        form.addRow(self.mode_label, self.mode)
+        self.count = QSpinBox()
+        self.count.setRange(1, 999)
+        self.count.setValue(row.repeat_count)
+        self.count.setSuffix(" 次")
+        self.count.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.count_label = QLabel("次数")
+        self.interval = QSpinBox()
+        self.interval.setRange(0 if self.sequence else 1, 99999)
+        self.interval.setValue(row.interval_spin.value())
+        self.interval.setSuffix(" ms")
+        self.interval.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.interval_label = QLabel("循环等待" if self.sequence else "连发间隔")
+        self.press = QSpinBox()
+        self.press.setRange(0, 86_400_000 if self.sequence else 99999)
+        self.press.setValue(row.press_spin.value())
+        self.press.setSuffix(" ms")
+        self.press.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.press_label = QLabel("录制时长" if self.sequence else "持续时长")
+        self.gap = QSpinBox()
+        self.gap.setRange(0, 99999)
+        self.gap.setValue(row.combo_gap_ms)
+        self.gap.setSuffix(" ms")
+        self.gap.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.gap_label = QLabel("组合间隔")
+        parameters = QGridLayout()
+        parameters.setHorizontalSpacing(10)
+        parameters.setVerticalSpacing(10)
+        parameters.setColumnStretch(1, 1)
+        parameters.setColumnStretch(3, 1)
+        for line, column, label, field in (
+            (0, 0, self.count_label, self.count),
+            (0, 2, self.interval_label, self.interval),
+            (1, 0, self.press_label, self.press),
+            (1, 2, self.gap_label, self.gap),
+        ):
+            parameters.addWidget(label, line, column)
+            parameters.addWidget(field, line, column + 1)
+        layout.addLayout(parameters)
+        self.preview = QLabel()
+        self.preview.setObjectName("bindingPreview")
+        self.preview.setWordWrap(True)
+        self.preview.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self.preview.ensurePolished()
+        self.preview.setFixedHeight(self.preview.fontMetrics().lineSpacing() * 2 + 2)
+        layout.addWidget(self.preview)
+        # Validation shares the explanation slot so errors never resize the dialog.
+        self.error = self.preview
+        self.passthrough = QCheckBox("触发键原本功能也生效")
+        self.passthrough.setChecked(row.pass_original)
+        self.passthrough.setToolTip("例如侧键 → C：不勾选时接管侧键；勾选时侧键原功能与 C 都执行。")
+        layout.addWidget(self.passthrough)
+        self.mode.currentIndexChanged.connect(self.refresh)
+        self.count.valueChanged.connect(self.refresh)
+        footer = QHBoxLayout()
+        self.clear_button = QPushButton("解除绑定")
+        self.clear_button.setObjectName("quietButton")
+        self.clear_button.setAutoDefault(False)
+        self.clear_button.clicked.connect(self.clear_trigger)
+        footer.addWidget(self.clear_button)
+        footer.addStretch(1)
+        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        self.save_button = self.buttons.button(QDialogButtonBox.StandardButton.Save)
+        self.save_button.setText("保存")
+        self.save_button.setObjectName("primaryButton")
+        self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        footer.addWidget(self.buttons)
+        layout.addLayout(footer)
+        self.refresh()
+        self.ensurePolished()
+        layout.activate()
+        self.setFixedSize(480, layout.sizeHint().height())
+
+    def set_output(self, binding: InputBinding) -> None:
+        self.binding = binding
+        self.output_button.set_binding(binding)
+        self._error_message = ""
+        self.refresh()
+
+    def set_trigger(self, binding: InputBinding) -> None:
+        if binding.additional:
+            self.set_error("触发键使用单键或鼠标按钮，可附加 Ctrl、Shift、Alt、Win。")
+            self.trigger_button.set_binding(self.trigger)
+            return
+        self.trigger = binding
+        self._unbinding = False
+        self.trigger_button.set_binding(binding)
+        self._error_message = ""
+        self.refresh()
+
+    def clear_trigger(self) -> None:
+        self.trigger = None
+        self._unbinding = True
+        self.trigger_button.set_binding(None)
+        self._error_message = ""
+        self.refresh()
+
+    def refresh(self, *_) -> None:
+        if not hasattr(self, "save_button"):
+            return
+        selected = self.mode.currentData()
+        active = not self._unbinding
+        self.mode.setEnabled(active)
+        self.mode_label.setEnabled(active)
+        burst = active and selected == "burst"
+        self.count.setEnabled(burst)
+        self.count_label.setEnabled(burst)
+        repeat = active and (selected == "repeat" or selected == "burst" and self.count.value() > 1)
+        self.interval.setEnabled(repeat)
+        self.interval_label.setEnabled(repeat)
+        tap = active and selected != "hold" and self.sequence is None
+        self.press.setEnabled(tap)
+        self.press_label.setEnabled(tap)
+        combo = active and self.sequence is None and self.binding is not None and len(binding_atoms(self.binding)) > 1
+        self.gap.setEnabled(combo)
+        self.gap_label.setEnabled(combo)
+        self.passthrough.setEnabled(active)
+        self.clear_button.setEnabled(self.trigger is not None)
+        self.preview.setObjectName("bindingError" if self._error_message else "bindingPreview")
+        descriptions = {
+            "repeat": "按住触发键期间循环回放，抬起即停止。",
+            "burst": f"每次按下触发键回放 {self.count.value()} 次，抬起不打断。",
+            "single": "每次按下触发键回放一次。",
+        } if self.sequence else {
+            "hold": "按下触发键时保持输出，抬起时释放。",
+            "repeat": "按住触发键期间连发，抬起即停止。",
+            "burst": f"每次按下触发键执行 {self.count.value()} 次，抬起不打断。",
+            "single": "每次按下触发键执行一次。",
+        }
+        description = descriptions[selected] if active else "保存后解除绑定，恢复自动执行。"
+        detail = description
+        if (self.binding or self.sequence) and self.row.state_button.isChecked():
+            entries = self.group_entries()
+            for overlap in find_overlaps([config for _, config in entries]):
+                if entries[overlap.first][0] is self.row or entries[overlap.second][0] is self.row:
+                    other = entries[overlap.second][0] if entries[overlap.first][0] is self.row else entries[overlap.first][0]
+                    description += f"\n与{other.row_label}共用{overlap.summary_resource}，按先后执行。"
+                    detail += f"\n与{other.row_label}共用{overlap.resource}；等待当前动作完成后执行。"
+                    break
+        self.preview.setText(self._error_message or description)
+        self.preview.setToolTip(self._error_message or detail)
+        self.preview.style().unpolish(self.preview)
+        self.preview.style().polish(self.preview)
+        if self._unbinding and not self.trigger_button.capturing:
+            self.trigger_button.setText("自动执行 · 点击重新绑定")
+        capturing = self.trigger_button.capturing or self.output_button.capturing
+        self.save_button.setEnabled((self.binding is not None or self.sequence is not None) and (self.trigger is not None or self._unbinding) and not capturing)
+
+    def set_error(self, message: str) -> None:
+        self._error_message = message
+        self.refresh()
+
+    def candidate_config(self) -> ActionConfig:
+        gap = self.gap.value() if self.binding and len(binding_atoms(self.binding)) > 1 else 0
+        selected = self.mode.currentData()
+        mode = self.row.automatic_mode if self._unbinding else "burst" if selected == "single" else selected
+        count = 1 if selected == "single" or self._unbinding and self.sequence else self.count.value()
+        return ActionConfig(self.binding, mode, self.interval.value(), 0 if self.sequence else self.press.value(), self.trigger, count, gap, self.passthrough.isChecked() if self.trigger else False, self.sequence)
+
+    def group_entries(self):
+        return [(row, self.candidate_config() if row is self.row else config)
+                for row in self.row.owner.actions if (config := row.action_config()) is not None
+                or row is self.row and row.state_button.isChecked()]
+
+    def accept(self) -> None:
+        if self.trigger_button.capturing or self.output_button.capturing:
+            return
+        if not self._unbinding and self.trigger is None:
+            self.set_error("请先点击触发键，按下要绑定的键。")
+            return
+        if self.binding is None and self.sequence is None:
+            self.set_error("请先录入输出按键或组合。")
+            return
+        self.config = self.candidate_config()
+        try:
+            validate_actions([self.config], self.row.owner.window.global_hotkey, labels=[self.row.row_label])
+            if self.row.state_button.isChecked():
+                entries = self.group_entries()
+                validate_actions([config for _, config in entries], self.row.owner.window.global_hotkey,
+                                 labels=[row.row_label for row, _ in entries])
+        except ValueError as exc:
+            self.set_error(str(exc))
+            return
+        super().accept()
+
+    def done(self, result: int) -> None:
+        self.trigger_button.reject()
+        self.output_button.reject()
+        super().done(result)
+
+
 class ActionRow(QFrame):
+    @property
+    def row_label(self) -> str:
+        return f"第{self.owner.actions.index(self) + 1}行"
+
     def __init__(self, owner: "GroupWidget", data: dict | None = None) -> None:
         super().__init__()
         self.owner = owner
         self.binding: InputBinding | None = None
+        self.sequence: RecordedSequence | None = None
+        self.trigger: InputBinding | None = None
+        self.execution_mode = "repeat"
+        self.automatic_mode = "repeat"
+        self._locked = False
+        self.repeat_count = 3
+        self.combo_gap_ms = 0
+        self.pass_original = False
         self.setObjectName("actionRow")
 
         row = QHBoxLayout(self)
@@ -842,6 +1236,7 @@ class ActionRow(QFrame):
         row.addWidget(self.remove_button)
 
         execution = QWidget()
+        self.execution_control = execution
         execution.setObjectName("executionControl")
         execution.setFixedWidth(126)
         execution_layout = QHBoxLayout(execution)
@@ -879,6 +1274,14 @@ class ActionRow(QFrame):
         self.record_button.clicked.connect(self.capture_binding)
         row.addWidget(self.record_button, 1)
 
+        self.settings_button = QPushButton("绑")
+        self.settings_button.setObjectName("bindButton")
+        self.settings_button.setFixedWidth(32)
+        self.settings_button.setAccessibleName("绑定按键")
+        self.settings_button.setToolTip("绑定触发键")
+        self.settings_button.clicked.connect(self.edit_action)
+        row.addWidget(self.settings_button)
+
         self.interval_field = IntervalField()
         self.interval_field.setObjectName("intervalField")
         self.interval_field.setFixedWidth(78)
@@ -901,72 +1304,183 @@ class ActionRow(QFrame):
         interval_layout.addWidget(interval_unit)
         row.addWidget(self.interval_field)
 
+        self.press_field, self.press_spin = press_duration_field()
+        self.press_spin.valueChanged.connect(owner.window.schedule_save)
+        row.addWidget(self.press_field)
+
         self.hold_button.toggled.connect(self.update_controls)
+        self.repeat_button.toggled.connect(self.update_controls)
         self.state_button.toggled.connect(self.update_controls)
         if data:
             self.load_dict(data)
         self.update_controls()
 
     def capture_binding(self) -> None:
+        if self.sequence:
+            from sequence_ui import SequenceEditor
+            SequenceEditor(self, BindingCaptureButton, binding_display).exec()
+            return
+        if self.trigger:
+            self.edit_action()
+            return
         dialog = CaptureDialog(self, allow_mouse=True, title="录入动作")
         if dialog.exec() != QDialog.DialogCode.Accepted or dialog.binding is None:
             return
         previous = self.binding
         self.binding = dialog.binding
-        self.record_button.setText(self.binding.display)
-        self.record_button.setToolTip(f"当前动作：{self.binding.display}；点击可重新录入")
+        self.refresh_binding()
         if previous is None and self.binding.kind == "mouse" and self.binding.code == "left" and self.interval_spin.value() == 150:
             self.interval_spin.setValue(8)
         self.owner.window.schedule_save()
 
+    def edit_action(self) -> None:
+        dialog = ActionEditor(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.apply_action_config(dialog.config)
+
+    def apply_action_config(self, config: ActionConfig, *, enabled: bool | None = None) -> None:
+        if self.trigger is None and config.trigger:
+            self.automatic_mode = self.execution_mode if self.execution_mode in ("repeat", "hold") or self.sequence else "repeat"
+        self.binding, self.trigger = config.binding, config.trigger
+        self.sequence = config.sequence
+        self.execution_mode = config.mode
+        if self.trigger is None:
+            self.automatic_mode = config.mode
+        self.repeat_count, self.combo_gap_ms, self.pass_original = config.repeat_count, config.combo_gap_ms, config.pass_original
+        with QSignalBlocker(self.hold_button), QSignalBlocker(self.repeat_button), QSignalBlocker(self.state_button):
+            self._modes.setExclusive(self.sequence is None)
+            self.hold_button.setChecked(self.automatic_mode == "hold")
+            self.repeat_button.setChecked(self.automatic_mode == "repeat" if self.sequence else self.automatic_mode != "hold")
+            if enabled is not None:
+                self.state_button.setChecked(enabled)
+        self.interval_spin.setValue(config.interval_ms)
+        self.press_spin.setValue(config.press_ms)
+        self.update_controls()
+        self.refresh_binding()
+
+    def apply_sequence(self, sequence: RecordedSequence) -> None:
+        self.sequence = sequence.validate()
+        self.binding = None
+        self.press_spin.setRange(0, 86_400_000)
+        self.press_spin.setValue(round(sequence.duration_us / 1000))
+        self.update_controls()
+
+    def refresh_binding(self) -> None:
+        output = self.sequence.name if self.sequence else binding_display(self.binding) if self.binding else "未设置按键"
+        label = f"{binding_display(self.trigger)} → {output}" if self.trigger else output
+        if self.trigger:
+            label += " · 循环" if self.sequence and self.execution_mode in ("repeat", "hold") else " · 跟随" if self.execution_mode == "hold" else " · 连发" if self.execution_mode == "repeat" else " · 单次" if self.repeat_count == 1 else f" ×{self.repeat_count} · 短发"
+        self.record_button.setText(label)
+        self.record_button.setToolTip(f"{label}；点击查看、编辑录制步骤" if self.sequence else f"{label}；点击编辑绑定" if self.trigger else "点击录入输出，点“绑”设置触发键")
+        self.settings_button.setProperty("bound", self.trigger is not None)
+        self.settings_button.setToolTip("编辑绑定；随总开关启用" if self.trigger else "绑定触发键")
+        self.settings_button.style().unpolish(self.settings_button)
+        self.settings_button.style().polish(self.settings_button)
+
     def update_controls(self) -> None:
+        bound = self.trigger is not None
+        if not bound:
+            self.execution_mode = ("repeat" if self.repeat_button.isChecked() else "burst") if self.sequence else "hold" if self.hold_button.isChecked() else "repeat"
+            self.automatic_mode = self.execution_mode
+            if self.sequence:
+                self.repeat_count = 1
+        self.repeat_button.setText("循环" if self.sequence else "间隔")
+        self.repeat_button.setToolTip("已绑定，只由触发键执行；自动模式不生效" if bound else "勾选循环；取消后仅回放一次" if self.sequence else "按间隔自动执行")
+        self.refresh_binding()
         enabled = self.state_button.isChecked()
         self.state_button.setText("启" if enabled else "停")
-        self.repeat_button.setEnabled(enabled)
-        self.hold_button.setEnabled(enabled)
-        self.record_button.setEnabled(enabled)
-        self.interval_field.setEnabled(enabled and self.repeat_button.isChecked())
+        self.execution_control.setEnabled(not self._locked)
+        self.state_button.setEnabled(not self._locked)
+        self.state_button.setToolTip("启用或停用这一条动作；随总开关执行")
+        self.repeat_button.setEnabled(enabled and not bound and not self._locked)
+        self.hold_button.setEnabled(enabled and not bound and not self._locked and self.sequence is None)
+        self.record_button.setEnabled(enabled and not self._locked)
+        self.settings_button.setEnabled(not self._locked)
+        taps = self.execution_mode != "hold"
+        repeating = self.execution_mode == "repeat" or self.execution_mode == "burst" and self.repeat_count > 1
+        self.interval_field.setEnabled(enabled and repeating and not self._locked)
+        self.press_field.setEnabled(enabled and taps and not self._locked)
+        self.press_spin.setReadOnly(self.sequence is not None)
+        self.interval_field.setToolTip("每次完整回放之后等待的时间" if self.sequence else "按下到下一次按下的间隔")
+        if self.sequence:
+            self.interval_spin.setMinimum(0)
+            self.press_spin.setRange(0, 86_400_000)
+            self.press_spin.setValue(round(self.sequence.duration_us / 1000))
+        for label in self.press_field.findChildren(QLabel):
+            if label.text() in ("持续", "时长"):
+                label.setText("时长" if self.sequence else "持续")
         self.owner.window.schedule_save()
 
     def action_config(self) -> ActionConfig | None:
-        if not self.state_button.isChecked() or self.binding is None:
+        if not self.state_button.isChecked() or self.binding is None and self.sequence is None:
             return None
-        mode = "hold" if self.hold_button.isChecked() else "repeat"
-        return ActionConfig(self.binding, mode, self.interval_spin.value())
+        return ActionConfig(self.binding, self.execution_mode, self.interval_spin.value(), 0 if self.sequence else self.press_spin.value(), self.trigger, self.repeat_count, self.combo_gap_ms, self.pass_original, self.sequence)
 
     def to_dict(self) -> dict:
         return {
             "enabled": self.state_button.isChecked(),
-            "mode": "hold" if self.hold_button.isChecked() else "repeat",
+            "mode": self.execution_mode,
+            "automatic_mode": self.automatic_mode,
             "interval_ms": self.interval_spin.value(),
+            "press_ms": self.press_spin.value(),
             "binding": self.binding.to_dict() if self.binding else None,
+            "trigger": self.trigger.to_dict() if self.trigger else None,
+            "repeat_count": self.repeat_count,
+            "combo_gap_ms": self.combo_gap_ms,
+            "pass_original": self.pass_original,
+            "sequence": self.sequence.to_dict() if self.sequence else None,
         }
 
     def load_dict(self, data: dict) -> None:
+        try:
+            self.sequence = RecordedSequence.from_dict(data["sequence"]) if data.get("sequence") is not None else None
+        except (ValueError, TypeError, KeyError):
+            self.sequence = None
+            data = {**data, "binding": None, "trigger": None, "enabled": False}
         binding = InputBinding.from_dict(data.get("binding"))
         self.binding = binding
+        if self.sequence:
+            self.binding = None
+        trigger_raw = data.get("trigger")
+        self.trigger = InputBinding.from_dict(trigger_raw)
+        if trigger_raw is not None and (self.trigger is None or self.trigger.additional):
+            self.trigger = None
+            self.binding = None
+            self.sequence = None
+        self.execution_mode = data.get("mode", "repeat")
+        if self.execution_mode not in ("repeat", "hold", "burst") or self.execution_mode == "burst" and not self.trigger and not self.sequence:
+            if self.execution_mode == "burst":
+                self.binding = None
+            self.execution_mode = "repeat"
+        automatic_mode = data.get("automatic_mode")
+        self.automatic_mode = automatic_mode if automatic_mode in (("repeat", "burst") if self.sequence else ("repeat", "hold")) else self.execution_mode if self.trigger is None else "burst" if self.sequence else "repeat"
+        count, gap = data.get("repeat_count", 3), data.get("combo_gap_ms", 0)
+        self.repeat_count = max(1, min(999, count)) if isinstance(count, int) and not isinstance(count, bool) else 3
+        self.combo_gap_ms = max(0, min(99999, gap)) if isinstance(gap, int) and not isinstance(gap, bool) else 0
+        self.pass_original = data.get("pass_original") is True
         if binding is not None:
             self.record_button.setText(binding_display(binding))
         try:
             interval = int(data.get("interval_ms", 150))
         except (TypeError, ValueError):
             interval = 150
+        self.interval_spin.setMinimum(0 if self.sequence else 1)
         self.interval_spin.setValue(interval)
-        self.hold_button.setChecked(data.get("mode") == "hold")
-        self.repeat_button.setChecked(data.get("mode") != "hold")
-        self.state_button.setChecked(bool(data.get("enabled", True)))
+        duration = data.get("press_ms", DEFAULT_PRESS_MS)
+        self.press_spin.setRange(0, 86_400_000 if self.sequence else 99999)
+        self.press_spin.setValue(duration if isinstance(duration, int) and not isinstance(duration, bool) else DEFAULT_PRESS_MS)
+        with QSignalBlocker(self.hold_button), QSignalBlocker(self.repeat_button), QSignalBlocker(self.state_button):
+            self._modes.setExclusive(self.sequence is None)
+            self.hold_button.setChecked(self.automatic_mode == "hold")
+            self.repeat_button.setChecked(self.automatic_mode == "repeat" if self.sequence else self.automatic_mode != "hold")
+            self.state_button.setChecked(bool(data.get("enabled", True)))
+        self.update_controls()
 
     def set_locked(self, locked: bool) -> None:
+        self._locked = locked
         self.drag_handle.setDisabled(locked)
         self.remove_button.setDisabled(locked)
-        self.state_button.setDisabled(locked)
-        if locked:
-            self.repeat_button.setDisabled(True)
-            self.hold_button.setDisabled(True)
-            self.record_button.setDisabled(True)
-            self.interval_field.setDisabled(True)
-        else:
-            self.update_controls()
+        self.update_controls()
 
 
 class GroupWidget(QFrame):
@@ -1084,7 +1598,7 @@ class GroupWidget(QFrame):
         return {"name": self.name, "actions": [action.to_dict() for action in self.actions]}
 
     def set_locked(self, locked: bool) -> None:
-        self.name_button.setDisabled(locked)
+        self.name_button.setEnabled(True)
         self.delete_button.setDisabled(locked)
         for action in self.actions:
             action.set_locked(locked)
@@ -1102,7 +1616,7 @@ class ClickerShell(QMainWindow):
 
     def __init__(self, settings: QSettings | None = None) -> None:
         super().__init__()
-        self.setWindowTitle("轻云连点器")
+        self.setWindowTitle(APP_TITLE)
         icon_path = resource_path("app.ico")
         if Path(icon_path).exists():
             self.setWindowIcon(QIcon(icon_path))
@@ -1113,13 +1627,22 @@ class ClickerShell(QMainWindow):
         self._hotkey_registration_scheduled = False
         self._hotkey_retry_count = 0
         self._running = False
+        self.recorder = None
+        self._recording_group = None
+        self._recording_started = 0.0
+        self._last_control_stop = float("-inf")
+        self._last_control_stop_tick = None
+        self._last_hotkey_stamp = None
         self.global_hotkey = InputBinding("keyboard", 0x77, 0, "F8")
         self.input_mode = "原生"
         self.target_window: WindowInfo | None = None
         self.ahk_path = str(self._settings.value("runtime/ahk_path", "") or "")
         self.bridge = UiBridge(self)
         self.bridge.execution_error.connect(self.execution_failed)
-        self.native_scheduler = NativeScheduler(lambda message: self.bridge.execution_error.emit(message))
+        self.bridge.execution_stopped.connect(self.stop_execution)
+        self.bridge.recording_finished.connect(self.finish_recording)
+        self.bridge.recording_error.connect(self.recording_failed)
+        self.native_scheduler = NativeScheduler(lambda message: self.bridge.execution_error.emit(message), on_stopped=self.bridge.execution_stopped.emit)
         self.ahk_runner = AhkRunner()
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
@@ -1129,8 +1652,11 @@ class ClickerShell(QMainWindow):
         self._shutdown_timer = QTimer(self)
         self._shutdown_timer.setInterval(1000)
         self._shutdown_timer.timeout.connect(self.update_shutdown)
+        self._recording_timer = QTimer(self)
+        self._recording_timer.setInterval(250)
+        self._recording_timer.timeout.connect(self.update_recording)
 
-        self.setMinimumSize(QSize(660, 250))
+        self.setMinimumSize(QSize(740, 250))
         saved_geometry = self._settings.value("window/geometry")
         if saved_geometry is None or not self.restoreGeometry(saved_geometry):
             self.resize(740, 420)
@@ -1188,6 +1714,7 @@ class ClickerShell(QMainWindow):
         interval_label.setFixedWidth(78)
         interval_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         heading.addWidget(interval_label)
+        heading.addSpacing(116)
         main.addLayout(heading)
 
         self.scroll = QScrollArea()
@@ -1228,6 +1755,12 @@ class ClickerShell(QMainWindow):
         controls.addWidget(self.export_button)
         controls.addStretch(1)
 
+        self.recording_button = QPushButton("录制动作")
+        self.recording_button.setFixedWidth(80)
+        self.recording_button.setObjectName("shutdownButton")
+        self.recording_button.setToolTip("3秒后录制；再次点击、F9或总启停键结束，保存到当前动作组")
+        self.recording_button.clicked.connect(self.toggle_recording)
+        controls.addWidget(self.recording_button)
         self.shutdown_button = QPushButton("定时关机")
         self.shutdown_button.setObjectName("shutdownButton")
         self.shutdown_button.setMinimumWidth(128)
@@ -1236,7 +1769,7 @@ class ClickerShell(QMainWindow):
         controls.addWidget(self.shutdown_button)
         controls.addStretch(1)
 
-        global_label = QLabel("快捷键")
+        global_label = QLabel("总启停")
         global_label.setObjectName("globalLabel")
         controls.addWidget(global_label)
         self.hotkey_button = QPushButton("F8")
@@ -1247,6 +1780,7 @@ class ClickerShell(QMainWindow):
         controls.addWidget(self.hotkey_button)
 
         self.start_button = QPushButton("启动")
+        self.start_button.setToolTip("启动当前组：自动动作执行，绑定动作监听；重复输出按先后执行")
         self.start_button.setObjectName("primaryButton")
         self.start_button.setProperty("launch", True)
         self.start_button.clicked.connect(self.toggle_execution)
@@ -1293,6 +1827,7 @@ class ClickerShell(QMainWindow):
 
     def perform_shutdown(self) -> None:
         from shutdown_timer import shutdown_windows
+        self.finish_recording()
         self.stop_execution()
         self.save_configuration()
         shutdown_windows()
@@ -1328,8 +1863,16 @@ class ClickerShell(QMainWindow):
         return group
 
     def activate_group(self, group: GroupWidget) -> None:
-        if group not in self.groups or self._running:
+        if group not in self.groups:
             return
+        if self.recorder:
+            if group is self.active_group:
+                return
+            self.finish_recording()
+        if self._running:
+            if group is self.active_group:
+                return
+            self.stop_execution()
         self.active_group = group
         for item in self.groups:
             item.set_active(item is group)
@@ -1441,29 +1984,54 @@ class ClickerShell(QMainWindow):
         try:
             msg = wintypes.MSG.from_address(int(message))
             if msg.message == self.WM_HOTKEY and int(msg.wParam) == self.HOTKEY_ID:
-                QTimer.singleShot(0, self.toggle_execution)
+                stamp = int(msg.time)
+                if stamp == self._last_hotkey_stamp:
+                    return True, 0
+                self._last_hotkey_stamp = stamp
+                if self.recorder:
+                    QTimer.singleShot(0, self.finish_recording)
+                elif self._running:
+                    QTimer.singleShot(0, self.stop_execution)
+                else:
+                    modal = QApplication.activeModalWidget()
+                    if modal is not None and getattr(modal, "_previewing", False):
+                        QTimer.singleShot(0, modal.preview)
+                    elif modal is None and (self._last_control_stop_tick is None or
+                        0 < ((stamp - self._last_control_stop_tick) & 0xFFFFFFFF) < 0x80000000):
+                        QTimer.singleShot(0, self.start_execution)
                 return True, 0
         except (TypeError, ValueError):
             pass
         return super().nativeEvent(event_type, message)
 
     def toggle_execution(self) -> None:
+        if self.recorder:
+            self.finish_recording()
+            return
         if self._running:
             self.stop_execution()
         else:
             self.start_execution()
 
     def start_execution(self) -> None:
+        if self.recorder:
+            return
         group = self.active_group
         if group is None:
             return
-        actions = [config for row in group.actions if (config := row.action_config()) is not None]
+        entries = [(row, config) for row in group.actions if (config := row.action_config()) is not None]
+        actions = [config for _, config in entries]
         if not actions:
             QMessageBox.information(self, "无法启动", "当前动作组没有已设置且启用的动作。")
             return
         try:
+            validate_actions(actions, self.global_hotkey, labels=[row.row_label for row, _ in entries],
+                             allow_overlap=self.input_mode == "原生")
+            if self.input_mode != "原生" and any(action.sequence or action.trigger or action.mode == "burst" or action.combo_gap_ms for action in actions):
+                QMessageBox.information(self, "输入方式", "录制回放、绑定、短连发和组合间隔请使用原生输入。")
+                return
             if self.input_mode == "原生":
-                self.native_scheduler.start(actions)
+                self.native_scheduler.start(actions, stop_binding=self.global_hotkey)
             else:
                 executable = find_ahk(self.ahk_path)
                 if executable is None:
@@ -1486,7 +2054,100 @@ class ClickerShell(QMainWindow):
         self._running = True
         self.set_running_ui(True)
 
+    def play_sequence(self, config: ActionConfig) -> bool:
+        if self.recorder:
+            return False
+        self.stop_execution()
+        try:
+            self.native_scheduler.start([config], stop_binding=self.global_hotkey)
+        except Exception as exc:
+            QMessageBox.warning(self, "无法试放", str(exc))
+            return False
+        self._running = True
+        self.set_running_ui(True)
+        return True
+
+    def toggle_recording(self) -> None:
+        if self.recorder:
+            self.finish_recording()
+            return
+        if self.input_mode != "原生":
+            QMessageBox.information(self, "输入方式", "全屏录制和回放请使用原生输入。")
+            return
+        self.stop_execution()
+        recorder = NativeRecorder(self.bridge.recording_finished.emit, self.bridge.recording_error.emit,
+                                  stop_binding=self.global_hotkey, start_delay_seconds=RECORDING_START_DELAY_SECONDS)
+        try:
+            recorder.start()
+        except Exception as exc:
+            QMessageBox.critical(self, "无法录制", str(exc))
+            return
+        self.recorder = recorder
+        self._recording_group = self.active_group
+        self._recording_started = getattr(recorder, "capture_start_seconds", time.perf_counter() + RECORDING_START_DELAY_SECONDS)
+        self.recording_button.setProperty("active", True)
+        self.recording_button.style().unpolish(self.recording_button)
+        self.recording_button.style().polish(self.recording_button)
+        self.set_running_ui(False)
+        self._recording_timer.start()
+        self.update_recording()
+
+    def update_recording(self) -> None:
+        if self.recorder and self._recording_group:
+            elapsed = time.perf_counter() - self._recording_started
+            if elapsed < 0:
+                remaining = math.ceil(-elapsed)
+                self.recording_button.setText(f"{remaining}s")
+                return
+            self.recording_button.setText("停止录制")
+            seconds = int(elapsed)
+            minutes, seconds = divmod(seconds, 60)
+            self._recording_group.count_label.setText(f"录制 {minutes:02d}:{seconds:02d}")
+            self.setWindowTitle(f"{APP_TITLE} — 录制中 · F9停止")
+
+    def finish_recording(self) -> None:
+        recorder = self.recorder
+        if recorder is None:
+            return
+        group = self._recording_group
+        number = sum(row.sequence is not None for row in group.actions) + 1 if group else 1
+        if group:
+            names = {row.sequence.name for row in group.actions if row.sequence}
+            while f"录制 {number}" in names:
+                number += 1
+        try:
+            sequence = recorder.finish(f"录制 {number}")
+        except Exception as exc:
+            # Preserve the live recorder reference if its thread could not stop.
+            QMessageBox.critical(self, "停止录制失败", str(exc))
+            return
+        self.recorder = None
+        self._last_control_stop = time.perf_counter()
+        self._last_control_stop_tick = ctypes.windll.kernel32.GetTickCount() & 0xFFFFFFFF
+        self._recording_group = None
+        self._recording_timer.stop()
+        self.recording_button.setText("录制动作")
+        self.recording_button.setProperty("active", False)
+        self.recording_button.style().unpolish(self.recording_button)
+        self.recording_button.style().polish(self.recording_button)
+        self.set_running_ui(False)
+        if group in self.groups:
+            if sequence:
+                group.add_action({"sequence": sequence.to_dict(), "binding": None, "mode": "burst",
+                                  "automatic_mode": "burst", "repeat_count": 1, "enabled": True,
+                                  "interval_ms": 1000, "press_ms": 0})
+            group.refresh_count()
+        self.save_configuration()
+
+    def recording_failed(self, message: str) -> None:
+        if self.recorder:
+            self.finish_recording()
+            QMessageBox.warning(self, "录制已停止", message)
+
     def stop_execution(self) -> None:
+        if self._running:
+            self._last_control_stop = time.perf_counter()
+            self._last_control_stop_tick = ctypes.windll.kernel32.GetTickCount() & 0xFFFFFFFF
         self.native_scheduler.stop()
         self.ahk_runner.stop()
         self._running = False
@@ -1498,21 +2159,23 @@ class ClickerShell(QMainWindow):
 
     def set_running_ui(self, running: bool) -> None:
         self.start_button.setText("停止" if running else "启动")
-        self.setWindowTitle(f"轻云连点器 — {self.active_group.name}运行中" if running and self.active_group else "轻云连点器")
+        self.setWindowTitle(f"{APP_TITLE} — {self.active_group.name}运行中" if running and self.active_group else APP_TITLE)
+        locked = running or self.recorder is not None
         for button in self.engine_buttons.values():
-            button.setDisabled(running)
-        self.target_button.setDisabled(running)
-        self.add_action_button.setDisabled(running)
-        self.add_group_button.setDisabled(running)
-        self.import_button.setDisabled(running)
-        self.hotkey_button.setDisabled(running)
+            button.setDisabled(locked)
+        self.target_button.setDisabled(locked)
+        self.add_action_button.setDisabled(locked)
+        self.add_group_button.setDisabled(locked)
+        self.import_button.setDisabled(locked)
+        self.hotkey_button.setDisabled(locked)
+        self.start_button.setDisabled(self.recorder is not None)
         for group in self.groups:
-            group.set_locked(running)
+            group.set_locked(locked)
 
     def configuration_dict(self) -> dict:
         active_index = self.groups.index(self.active_group) if self.active_group in self.groups else 0
         return {
-            "version": 1,
+            "version": 2 if any(row.sequence for group in self.groups for row in group.actions) else 1,
             "input_mode": self.input_mode,
             "global_hotkey": self.global_hotkey.to_dict(),
             "active_group": active_index,
@@ -1579,7 +2242,7 @@ class ClickerShell(QMainWindow):
             return
         try:
             data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
-            if not isinstance(data, dict) or data.get("version") != 1 or not isinstance(data.get("groups"), list):
+            if not isinstance(data, dict) or data.get("version") not in (1, 2) or not isinstance(data.get("groups"), list):
                 raise ValueError("不是受支持的轻云连点器配置文件")
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             QMessageBox.critical(self, "导入失败", str(exc))
@@ -1594,6 +2257,10 @@ class ClickerShell(QMainWindow):
         pass
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt API naming
+        self.finish_recording()
+        if self.recorder:
+            event.ignore()
+            return
         self.shutdown_countdown.cancel()
         self._shutdown_timer.stop()
         self.stop_execution()
@@ -1608,7 +2275,8 @@ def main() -> int:
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
     app = QApplication(sys.argv)
-    app.setApplicationName("轻云连点器")
+    app.setApplicationName(APP_NAME)
+    app.setApplicationVersion(APP_VERSION)
     icon_path = resource_path("app.ico")
     if Path(icon_path).exists():
         app.setWindowIcon(QIcon(icon_path))
@@ -1633,9 +2301,109 @@ def main() -> int:
                 try:
                     assert window.isVisible()
                     assert window.groups[0].actions[0].interval_spin.value() == 2000
+                    assert window.groups[0].actions[0].press_spin.value() == DEFAULT_PRESS_MS
+                    assert window.windowTitle() == APP_TITLE
                     assert window.shutdown_button.text() == "定时关机"
+                    assert window.recording_button.text() == "录制动作"
+                    row = window.groups[0].actions[0]
+                    assert row.settings_button.text() == "绑"
+                    row.apply_action_config(ActionConfig(InputBinding("keyboard", 0x43, additional=(InputAtom("mouse", "right"),)), "hold", 2000, trigger=InputBinding("mouse", "x1"), combo_gap_ms=25))
+                    assert row.execution_control.isEnabled() and row.state_button.isEnabled()
+                    assert not row.repeat_button.isEnabled() and not row.hold_button.isEnabled()
+                    assert row.settings_button.isEnabled()
+                    editor = ActionEditor(row)
+                    editor.show()
+                    app.processEvents()
+                    assert editor.save_button.isEnabled()
+                    assert not editor.interval.isEnabled() and not editor.press.isEnabled()
+                    assert editor.grab().save(str(report.with_name(report.stem + ".binding.png")))
+                    editor.reject()
                     assert window.grab().save(str(report.with_suffix(".png")))
-                    report.write_text(json.dumps({"ok": True, "platform": app.platformName(), "frozen": bool(getattr(sys, "frozen", False)), "size": [window.width(), window.height()], "ready_perf_counter": ready_at }), encoding="utf-8")
+                    from recording_models import RecordedEvent
+                    from sequence_ui import SequenceEditor
+                    from wininput import desktop_bounds
+                    sequence = RecordedSequence("录制 1", (RecordedEvent(0, "key", 0x41, True), RecordedEvent(50_000, "key", 0x41, False)), 150_000, screen_bounds=desktop_bounds())
+                    window.groups[0].add_action({"sequence": sequence.to_dict(), "mode": "burst", "automatic_mode": "burst", "repeat_count": 1})
+                    recorded_row = window.groups[0].actions[-1]
+                    assert recorded_row.sequence == sequence and recorded_row.press_spin.isReadOnly()
+                    sequence_editor = SequenceEditor(recorded_row, BindingCaptureButton, binding_display)
+                    sequence_editor.show()
+                    app.processEvents()
+                    assert sequence_editor.table.rowCount() == 1
+                    sequence_editor.capture.set_binding(InputBinding("keyboard", 0x42))
+                    sequence_editor.insert_step()
+                    assert sequence_editor.table.rowCount() == 2 and sequence_editor.sequence.can_restore
+                    assert sequence_editor.table.item(1, 0).data(Qt.ItemDataRole.UserRole) == "inserted"
+                    sequence_editor.undo()
+                    assert sequence_editor.sequence == sequence
+                    sequence_editor.redo()
+                    modified = sequence_editor.sequence
+                    sequence_editor.restore()
+                    assert sequence_editor.sequence.events == sequence.events
+                    sequence_editor.undo()
+                    assert sequence_editor.sequence == modified
+                    sequence_editor.table.selectRow(1)
+                    app.processEvents()
+                    assert sequence_editor.grab().save(str(report.with_name(report.stem + ".recording.png")))
+                    sequence_editor.reject()
+                    from recording_tail import TailCut, trim_recording_tail
+                    raw_sequence = RecordedSequence("录制 1", (
+                        RecordedEvent(0, "key", 0x41, True), RecordedEvent(50_000, "key", 0x41, False),
+                        RecordedEvent(100_000, "key", 0xA4, True), RecordedEvent(120_000, "key", 0x09, True),
+                        RecordedEvent(140_000, "key", 0x09, False), RecordedEvent(160_000, "key", 0xA4, False),
+                    ), 500_000, screen_bounds=desktop_bounds()).validate()
+                    trimmed = trim_recording_tail(raw_sequence, TailCut(2, 100_000_000), 0)
+                    assert trimmed.duration_us == 100_000 and trimmed.can_restore
+                    recorded_row.apply_action_config(ActionConfig(None, "burst", 1000, repeat_count=1, sequence=trimmed))
+                    tail_editor = SequenceEditor(recorded_row, BindingCaptureButton, binding_display)
+                    tail_editor.show()
+                    app.processEvents()
+                    assert tail_editor.restore_button.isEnabled()
+                    assert tail_editor.grab().save(str(report.with_name(report.stem + ".trimmed.png")))
+                    tail_editor.restore()
+                    assert tail_editor.sequence.events == raw_sequence.events
+                    tail_editor.undo()
+                    assert tail_editor.sequence == trimmed
+                    tail_editor.reject()
+                    assert recorded_row.sequence == trimmed
+                    window.groups[0].add_action()
+                    window.groups[0].actions[-1].apply_action_config(ActionConfig(InputBinding("keyboard", 0x43), "repeat", 150))
+                    mixed_editor = ActionEditor(row)
+                    mixed_editor.show()
+                    app.processEvents()
+                    assert "共用C" in mixed_editor.preview.text()
+                    assert mixed_editor.grab().save(str(report.with_name(report.stem + ".mixed.png")))
+                    mixed_editor.accept()
+                    assert mixed_editor.result() == QDialog.DialogCode.Accepted
+                    # Exercise the actual countdown UI with isolated data and no hooks.
+                    class SmokeRecorder:
+                        def __init__(self, *args, **kwargs):
+                            assert kwargs["start_delay_seconds"] == 3
+                            self.capture_start_seconds = time.perf_counter() + 3
+                        def start(self): pass
+                        def finish(self, name): return None
+                    recorder_type = globals()["NativeRecorder"]
+                    geometry = window.recording_button.geometry()
+                    action_count = len(window.active_group.actions)
+                    countdown_labels = []
+                    try:
+                        globals()["NativeRecorder"] = SmokeRecorder
+                        window.toggle_recording()
+                        for remaining, expected in ((3, "3s"), (2, "2s"), (1, "1s"), (0, "停止录制")):
+                            window._recording_started = time.perf_counter() + remaining - .25
+                            window.update_recording()
+                            app.processEvents()
+                            assert window.recording_button.text() == expected
+                            assert window.recording_button.geometry() == geometry
+                            countdown_labels.append(expected)
+                            assert window.grab().save(str(report.with_name(report.stem + f".countdown-{remaining}.png")))
+                        window.finish_recording()
+                        assert window.recording_button.text() == "录制动作"
+                        assert window.start_button.isEnabled() and not window._recording_timer.isActive()
+                        assert len(window.active_group.actions) == action_count
+                    finally:
+                        globals()["NativeRecorder"] = recorder_type
+                    report.write_text(json.dumps({"ok": True, "platform": app.platformName(), "frozen": bool(getattr(sys, "frozen", False)), "version": app.applicationVersion(), "default_press_ms": window.groups[0].actions[0].press_spin.value(), "size": [window.width(), window.height()], "ready_perf_counter": ready_at, "mixed_rules_checked": True, "recording_delay_checked": True, "recording_tail_checked": True, "countdown_labels": countdown_labels }), encoding="utf-8")
                     window.close()
                     app.exit(0)
                 except Exception as exc:

@@ -8,6 +8,7 @@ from ctypes import wintypes
 from dataclasses import dataclass
 
 from models import InputAtom, InputBinding
+from recording_models import RecordedEvent
 
 
 if os.name != "nt":
@@ -23,6 +24,7 @@ KEYEVENTF_EXTENDEDKEY = 0x0001
 KEYEVENTF_KEYUP = 0x0002
 KEYEVENTF_SCANCODE = 0x0008
 MAPVK_VK_TO_VSC = 0
+INJECTION_TAG = 0x51434C4B
 
 MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
@@ -104,6 +106,7 @@ EXTENDED_KEYS = {
     0x5B, 0x5C,              # Windows keys
     0x6F,                    # Numpad divide
     0x90,                    # NumLock
+    0xA3, 0xA5,              # right Control, right Alt
 }
 
 MODIFIER_VKS = (
@@ -131,8 +134,8 @@ def _keyboard_input(vk: int, is_up: bool) -> INPUT:
         flags |= KEYEVENTF_SCANCODE
         if vk in EXTENDED_KEYS:
             flags |= KEYEVENTF_EXTENDEDKEY
-        return INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(0, scan, flags, 0, 0))
-    return INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(vk, 0, flags, 0, 0))
+        return INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(0, scan, flags, 0, INJECTION_TAG))
+    return INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(vk, 0, flags, 0, INJECTION_TAG))
 
 
 def _mouse_input(button: str, is_up: bool) -> INPUT:
@@ -144,7 +147,7 @@ def _mouse_input(button: str, is_up: bool) -> INPUT:
         "x2": (MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, 2),
     }
     down, up, data = flags_by_button[button]
-    return INPUT(type=INPUT_MOUSE, mi=MOUSEINPUT(0, 0, data, up if is_up else down, 0, 0))
+    return INPUT(type=INPUT_MOUSE, mi=MOUSEINPUT(0, 0, data, up if is_up else down, 0, INJECTION_TAG))
 
 
 def _atom_input(atom: InputAtom, is_up: bool) -> INPUT:
@@ -155,6 +158,12 @@ def _atom_input(atom: InputAtom, is_up: bool) -> INPUT:
 
 def _binding_atoms(binding: InputBinding) -> tuple[InputAtom, ...]:
     return (InputAtom(binding.kind, binding.code), *binding.additional)
+
+
+def binding_atoms(binding: InputBinding) -> tuple[InputAtom, ...]:
+    """Physical outputs, including modifiers, in their press order."""
+    modifiers = tuple(InputAtom("keyboard", vk) for flag, vk in MODIFIER_VKS if binding.modifiers & flag)
+    return tuple(dict.fromkeys((*modifiers, *_binding_atoms(binding))))
 
 
 def binding_down(binding: InputBinding) -> None:
@@ -176,8 +185,47 @@ def binding_up(binding: InputBinding) -> None:
 
 
 def binding_tap(binding: InputBinding) -> None:
-    binding_down(binding)
-    binding_up(binding)
+    try:
+        binding_down(binding)
+    finally:
+        # A partial SendInput failure can still leave some outputs down.
+        binding_up(binding)
+
+
+user32.GetSystemMetrics.argtypes = (ctypes.c_int,)
+user32.GetSystemMetrics.restype = ctypes.c_int
+
+
+def desktop_bounds() -> tuple[int, int, int, int]:
+    return tuple(int(user32.GetSystemMetrics(index)) for index in (76, 77, 78, 79))
+
+
+def recorded_input(event: RecordedEvent, pointer_mode: str = "screen") -> None:
+    """Replay one event, retaining the captured keyboard scan and extended bit."""
+    if event.kind == "key":
+        if event.scan:
+            flags = KEYEVENTF_SCANCODE | (0 if event.pressed else KEYEVENTF_KEYUP) | (KEYEVENTF_EXTENDEDKEY if event.extended else 0)
+            _send([INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(0, event.scan, flags, 0, INJECTION_TAG))])
+        else:
+            _send([_keyboard_input(int(event.code), not event.pressed)])
+        return
+    if event.kind == "relative":
+        if pointer_mode == "relative":
+            _send([INPUT(type=INPUT_MOUSE, mi=MOUSEINPUT(event.x, event.y, 0, 0x0001, 0, INJECTION_TAG))])
+        return
+    if event.kind == "move" and pointer_mode != "screen":
+        return
+    items = []
+    if event.kind in ("move", "button", "wheel") and pointer_mode == "screen":
+        left, top, width, height = desktop_bounds()
+        x = max(0, min(65535, round((event.x - left) * 65535 / max(1, width - 1))))
+        y = max(0, min(65535, round((event.y - top) * 65535 / max(1, height - 1))))
+        items.append(INPUT(type=INPUT_MOUSE, mi=MOUSEINPUT(x, y, 0, 0x0001 | 0x8000 | 0x4000, 0, INJECTION_TAG)))
+    if event.kind == "button":
+        items.append(_mouse_input(str(event.code), not event.pressed))
+    elif event.kind == "wheel":
+        items.append(INPUT(type=INPUT_MOUSE, mi=MOUSEINPUT(0, 0, event.delta & 0xFFFFFFFF, 0x1000 if event.horizontal else 0x800, 0, INJECTION_TAG)))
+    _send(items)
 
 
 def register_hotkey(hwnd: int, hotkey_id: int, binding: InputBinding) -> None:

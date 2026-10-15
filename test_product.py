@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import time
+import threading
 import tempfile
 import unittest
 from pathlib import Path
@@ -46,17 +47,22 @@ class ModelTests(unittest.TestCase):
 
 class SchedulerTests(unittest.TestCase):
     def test_hold_is_released_and_repeat_runs(self) -> None:
-        repeat = ActionConfig(InputBinding("keyboard", 0x41, 0, "A"), "repeat", 8)
+        repeat = ActionConfig(InputBinding("keyboard", 0x41, 0, "A"), "repeat", 8, 0)
         hold = ActionConfig(InputBinding("keyboard", 0x57, 0, "W"), "hold", 100)
         calls: list[tuple[str, str]] = []
+        repeated = threading.Event()
+        def tap(binding):
+            calls.append(("tap", binding.display))
+            if calls.count(("tap", "A")) >= 2:
+                repeated.set()
         with (
             patch("scheduler.binding_down", side_effect=lambda binding: calls.append(("down", binding.display))),
             patch("scheduler.binding_up", side_effect=lambda binding: calls.append(("up", binding.display))),
-            patch("scheduler.binding_tap", side_effect=lambda binding: calls.append(("tap", binding.display))),
+            patch("scheduler.binding_tap", side_effect=tap),
         ):
             scheduler = NativeScheduler()
             scheduler.start([repeat, hold])
-            time.sleep(0.035)
+            self.assertTrue(repeated.wait(1.5), calls)
             scheduler.stop()
         self.assertEqual(calls.count(("down", "W")), 1)
         self.assertEqual(calls.count(("up", "W")), 1)
@@ -66,7 +72,7 @@ class SchedulerTests(unittest.TestCase):
 class AhkTests(unittest.TestCase):
     def test_script_contains_repeat_hold_and_graceful_stop(self) -> None:
         actions = [
-            ActionConfig(InputBinding("keyboard", 0x41, 0x0002, "Ctrl+A"), "repeat", 25),
+            ActionConfig(InputBinding("keyboard", 0x41, 0x0002, "Ctrl+A"), "repeat", 25, 0),
             ActionConfig(InputBinding("mouse", "right", 0, "鼠标右键"), "hold", 100),
         ]
         script = AhkRunner._build_script(actions, Path(r"C:\Temp\stop.signal"), None)
@@ -77,7 +83,7 @@ class AhkTests(unittest.TestCase):
         self.assertIn("while !FileExist(stopFile)", script)
 
     def test_window_mouse_uses_control_click(self) -> None:
-        action = ActionConfig(InputBinding("mouse", "left", 0x0002, "Ctrl+鼠标左键"), "repeat", 8)
+        action = ActionConfig(InputBinding("mouse", "left", 0x0002, "Ctrl+鼠标左键"), "repeat", 8, 0)
         script = AhkRunner._build_script([action], Path(r"C:\Temp\stop.signal"), 1234)
         self.assertIn('ControlSend("{Ctrl down}"', script)
         self.assertIn('ControlClick(, "ahk_id 1234", , "Left", 1, "D NA")', script)
@@ -86,7 +92,7 @@ class AhkTests(unittest.TestCase):
 
     def test_multi_key_combo_is_pressed_and_released_in_order(self) -> None:
         binding = InputBinding("keyboard", 0x41, 0, "A+B", (InputAtom("keyboard", 0x42),))
-        script = AhkRunner._build_script([ActionConfig(binding, "repeat", 20)], Path(r"C:\Temp\stop.signal"), None)
+        script = AhkRunner._build_script([ActionConfig(binding, "repeat", 20, 0)], Path(r"C:\Temp\stop.signal"), None)
         self.assertIn("{vk41 down}{vk42 down}{vk42 up}{vk41 up}", script)
 
 
