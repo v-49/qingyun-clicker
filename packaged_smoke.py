@@ -6,6 +6,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from app_version import APP_VERSION
+from models import DEFAULT_PRESS_MS
 
 
 def main():
@@ -32,6 +34,11 @@ def main():
             raise RuntimeError(f'Packaged EXE failed: exit code {code}')
         result = json.loads(report.read_text(encoding='utf-8'))
         assert result['ok'] and result['frozen'] and result['platform'] == 'windows', result
+        assert result['version'] == APP_VERSION and result['default_press_ms'] == DEFAULT_PRESS_MS, result
+        assert result['mixed_rules_checked'], result
+        assert result['recording_delay_checked'], result
+        assert result['recording_tail_checked'], result
+        assert result['countdown_labels'] == ['3s', '2s', '1s', '停止录制'], result
         print('Standalone EXE startup verified:', result)
 
 

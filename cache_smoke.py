@@ -22,7 +22,7 @@ def main():
         cache=folder/'runtime'
         env={k:v for k,v in os.environ.items() if not k.startswith(('QT_','PYTHON'))}
         env.update(PATH=str(Path(os.environ['SystemRoot'])/'System32'),__COMPAT_LAYER='RunAsInvoker',QINGYUN_TEST_CACHE=str(cache))
-        startup=subprocess.STARTUPINFO();startup.dwFlags|=subprocess.STARTF_USESHOWWINDOW;startup.wShowWindow=1
+        startup=subprocess.STARTUPINFO();startup.dwFlags|=subprocess.STARTF_USESHOWWINDOW;startup.wShowWindow=0
         def spawn(name):
             report=folder/(name+'.json');start=time.perf_counter()
             process=subprocess.Popen([str(executable),'--smoke-test',str(report)],cwd=temp,env=env,startupinfo=startup)

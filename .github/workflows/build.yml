@@ -22,4 +22,4 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: qingyun-clicker-windows
-          path: dist/轻云连点器.exe
+          path: dist/QingyunClicker-v2.0-beta11.exe

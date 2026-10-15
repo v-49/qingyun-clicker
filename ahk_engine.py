@@ -105,6 +105,8 @@ class AhkRunner:
             raise RuntimeError("AHK engine is already running")
         if not actions:
             raise ValueError("No enabled actions")
+        if any(action.sequence for action in actions):
+            raise ValueError("录制回放请使用原生输入")
 
         self._temp = tempfile.TemporaryDirectory(prefix="clicker_ahk_")
         directory = Path(self._temp.name)
@@ -154,6 +156,10 @@ class AhkRunner:
 
     @staticmethod
     def _build_script(actions: list[ActionConfig], stop_file: Path, target_hwnd: int | None) -> str:
+        from scheduler import validate_actions
+        validate_actions(actions, allow_overlap=False)
+        if any(action.trigger or action.mode == "burst" or action.combo_gap_ms for action in actions):
+            raise ValueError("绑定、短连发和组合间隔请使用原生输入")
         lines = [
             "#Requires AutoHotkey v2.0",
             "#SingleInstance Force",
@@ -167,6 +173,30 @@ class AhkRunner:
         for index, action in enumerate(actions, start=1):
             binding = action.binding
             if action.mode == "repeat":
+                if action.press_ms > 0:
+                    down_calls = _target_binding_calls(binding, target, True) if target_hwnd else [f"Send({_quoted(_down_sequence(binding))})"]
+                    up_calls = _target_binding_calls(binding, target, False) if target_hwnd else [f"Send({_quoted(_up_sequence(binding))})"]
+                    lines.extend([
+                        f"Held{index} := false",
+                        f"Action{index}(*) {{",
+                        f"    global Held{index}",
+                        f"    if Held{index}",
+                        "        return",
+                        f"    Held{index} := true",
+                        *[f"    {call}" for call in down_calls],
+                        f"    SetTimer Release{index}, -{action.press_ms}",
+                        "}",
+                        f"Release{index}(*) {{",
+                        f"    global Held{index}",
+                        f"    if !Held{index}",
+                        "        return",
+                        *[f"    {call}" for call in up_calls],
+                        f"    Held{index} := false",
+                        "}",
+                        f"SetTimer Action{index}, {max(action.interval_ms, action.press_ms + 1)}",
+                    ])
+                    release_blocks.append([f"Release{index}()"])
+                    continue
                 if target_hwnd:
                     body_lines = [*_target_binding_calls(binding, target, True), *_target_binding_calls(binding, target, False)]
                 else:

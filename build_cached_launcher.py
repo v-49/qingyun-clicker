@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import zipfile
+from app_version import APP_NAME, APP_VERSION, EXE_NAME, WINDOWS_VERSION
 
 ROOT=Path(__file__).resolve().parent
 runtime=ROOT/'dist'/'QingyunRuntime'
@@ -16,9 +17,18 @@ version=hashlib.sha256(manifest.encode()).hexdigest()
 (build/'manifest.txt').write_text(manifest,encoding='utf-8')
 with zipfile.ZipFile(build/'payload.zip','w',zipfile.ZIP_DEFLATED,compresslevel=6) as archive:
     for p in files: archive.write(p,p.relative_to(runtime).as_posix())
-(build/'CacheLauncher.cs').write_text((ROOT/'CacheLauncher.cs').read_text(encoding='utf-8').replace('@VERSION_ID@',version),encoding='utf-8')
+launcher_source = (ROOT/'CacheLauncher.cs').read_text(encoding='utf-8').replace('@VERSION_ID@',version)
+metadata = (
+    f'[assembly: AssemblyTitle("{APP_NAME}")]\n'
+    f'[assembly: AssemblyProduct("{APP_NAME}")]\n'
+    f'[assembly: AssemblyVersion("{WINDOWS_VERSION}")]\n'
+    f'[assembly: AssemblyFileVersion("{WINDOWS_VERSION}")]\n'
+    f'[assembly: AssemblyInformationalVersion("{APP_VERSION}")]\n'
+)
+launcher_source = launcher_source.replace('class CacheLauncher {', metadata + '\nclass CacheLauncher {', 1)
+(build/'CacheLauncher.cs').write_text(launcher_source,encoding='utf-8')
 csc=Path(os.environ['SystemRoot'])/'Microsoft.NET'/'Framework64'/'v4.0.30319'/'csc.exe'
-output=ROOT/'dist'/'轻云连点器.exe'
+output=ROOT/'dist'/EXE_NAME
 subprocess.run([str(csc),'/nologo','/target:winexe','/platform:x64','/optimize+',
                 '/r:System.IO.Compression.dll','/r:System.Windows.Forms.dll',
                 f'/win32manifest:{ROOT / "launcher.manifest"}',f'/win32icon:{ROOT / "app.ico"}',
