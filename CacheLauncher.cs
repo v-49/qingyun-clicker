@@ -74,6 +74,21 @@ class CacheLauncher {
             Directory.Delete(directory,true); return true;
         } catch(IOException) { return false; } catch(UnauthorizedAccessException) { return false; }
     }
+    static void PublishStaging(string staging, string directory) {
+        // Scanners can briefly hold newly extracted files/directories open.
+        // Retry only the atomic rename; never replace an active destination.
+        var watch=Stopwatch.StartNew();
+        while(true) {
+            CheckDirectory(staging);
+            try { Directory.Move(staging,directory); return; }
+            catch(IOException) {
+                if(watch.ElapsedMilliseconds>=10000 || Directory.Exists(directory) || !Directory.Exists(staging)) throw;
+            } catch(UnauthorizedAccessException) {
+                if(watch.ElapsedMilliseconds>=10000 || Directory.Exists(directory) || !Directory.Exists(staging)) throw;
+            }
+            Thread.Sleep(75);
+        }
+    }
     static void Extract(string directory, List<Entry> entries) {
         string staging=Path.Combine(root,VersionId+".tmp."+Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(staging); File.WriteAllText(Path.Combine(staging,".managed"),Marker);
@@ -88,7 +103,7 @@ class CacheLauncher {
             }
             if(!Validate(staging,entries)) throw new IOException("运行文件校验失败，请重新下载应用。");
             if(Directory.Exists(directory) && !DeleteManaged(directory)) throw new IOException("运行文件正在使用或缓存不完整，请关闭连点器后重试。");
-            Directory.Move(staging,directory);
+            PublishStaging(staging,directory);
         } finally { if(Directory.Exists(staging)) DeleteManaged(staging); }
     }
     // Windows command line escaping, including quotes and trailing backslashes.
@@ -102,8 +117,8 @@ class CacheLauncher {
         result.Append('\\',slashes*2); return result.Append('"').ToString();
     }
     [STAThread] static int Main(string[] args) {
+        bool test=args.Length==2 && args[0]=="--smoke-test";
         try {
-            bool test=args.Length==2 && args[0]=="--smoke-test";
             root=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"QingyunClicker","runtime");
             if(test && !String.IsNullOrEmpty(Environment.GetEnvironmentVariable("QINGYUN_TEST_CACHE"))) root=Path.GetFullPath(Environment.GetEnvironmentVariable("QINGYUN_TEST_CACHE"));
             Directory.CreateDirectory(root); CheckDirectory(root);
@@ -142,6 +157,11 @@ class CacheLauncher {
                 info.EnvironmentVariables["QINGYUN_WRAPPER_PID"]=Process.GetCurrentProcess().Id.ToString();
                 using(var process=Process.Start(info)) { process.WaitForExit(); return process.ExitCode; }
             }
-        } catch(Exception ex) { MessageBox.Show("启动失败："+ex.Message,"轻云连点器",MessageBoxButtons.OK,MessageBoxIcon.Error); return 1; }
+        } catch(Exception ex) {
+            if(test) {
+                try { File.WriteAllText(args[1]+".launcher-error.txt",ex.ToString()); } catch(Exception) {}
+            } else MessageBox.Show("启动失败："+ex.Message,"轻云连点器",MessageBoxButtons.OK,MessageBoxIcon.Error);
+            return 1;
+        }
     }
 }

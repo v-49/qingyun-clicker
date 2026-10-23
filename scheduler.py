@@ -118,6 +118,8 @@ class _State:
     cursor: int = 0
     sequence_started: float | None = None
     sequence_due: float | None = None
+    sequence_timestamps: tuple[int, ...] | None = None
+    sequence_duration_us: int = 0
     held_events: dict[InputAtom, RecordedEvent] = field(default_factory=dict)
     executing: bool = False
 
@@ -268,9 +270,13 @@ class NativeScheduler:
             if state.remaining is not None:
                 state.remaining -= 1
             if config.sequence:
+                timing = config.sequence.playback_timing
+                state.sequence_timestamps = timing.timestamps
+                state.sequence_duration_us = timing.duration_us
                 state.cursor = 0
                 state.sequence_started = now
-                state.sequence_due = now + config.sequence.events[0].t_us / 1_000_000
+                first = state.sequence_timestamps[0] if state.sequence_timestamps is not None else config.sequence.events[0].t_us
+                state.sequence_due = now + first / 1_000_000
                 state.due = float("inf")
                 return
             cycle = max(config.interval_ms, config.press_ms + config.combo_gap_ms * (len(state.atoms) - 1) + 1) / 1000
@@ -302,7 +308,8 @@ class NativeScheduler:
             processed = 0
             while state.cursor < len(sequence.events) and not self._stop.is_set() and processed < 512:
                 event = sequence.events[state.cursor]
-                deadline = state.sequence_started + event.t_us / 1_000_000
+                stamp = state.sequence_timestamps[state.cursor] if state.sequence_timestamps is not None else event.t_us
+                deadline = state.sequence_started + stamp / 1_000_000
                 if deadline > now:
                     state.sequence_due = deadline
                     return
@@ -324,9 +331,10 @@ class NativeScheduler:
                 state.cursor += 1
                 processed += 1
             if state.cursor < len(sequence.events):
-                state.sequence_due = state.sequence_started + sequence.events[state.cursor].t_us / 1_000_000
+                stamp = state.sequence_timestamps[state.cursor] if state.sequence_timestamps is not None else sequence.events[state.cursor].t_us
+                state.sequence_due = state.sequence_started + stamp / 1_000_000
                 return
-            end = state.sequence_started + sequence.duration_us / 1_000_000
+            end = state.sequence_started + state.sequence_duration_us / 1_000_000
             if now < end:
                 state.sequence_due = end
                 return

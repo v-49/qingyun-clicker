@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QComboBox, Q
 
 from models import ActionConfig, InputBinding
 from recording_models import insert_press, paired_span, remove_events, preserve_original, restore_original
+from recording_playback import MOVEMENT_SPEEDS
 from wininput import binding_atoms
 
 
@@ -75,6 +76,14 @@ class SequenceEditor(QDialog):
         self.pointer.currentIndexChanged.connect(self.select_pointer)
         top.addWidget(QLabel("鼠标"))
         top.addWidget(self.pointer)
+        top.addWidget(QLabel("加速"))
+        self.speed = QComboBox()
+        for value in MOVEMENT_SPEEDS:
+            self.speed.addItem(f"{value:g}×", value)
+        self.speed.setCurrentIndex(self.speed.findData(self.sequence.movement_speed))
+        self.speed.setToolTip("仅加速未按住键鼠时的连续屏幕移动；点击、按住、停顿及相对移动保持原速。\n不识别加载或技能冷却；移动过程中也可能需要等待，请按实际情况选择倍率。")
+        self.speed.currentIndexChanged.connect(self.select_speed)
+        top.addWidget(self.speed)
         layout.addLayout(top)
 
         self.table = QTableWidget(0, 4)
@@ -176,6 +185,9 @@ class SequenceEditor(QDialog):
         else:
             self.error.clear()
 
+    def select_speed(self):
+        self.change(replace(self.sequence, movement_speed=self.speed.currentData()))
+
     def rename(self):
         name = self.name.text().strip()
         if name and name != self.sequence.name and not self._previewing:
@@ -230,7 +242,12 @@ class SequenceEditor(QDialog):
                     item.setForeground(QBrush(QColor(INSERTED_FOREGROUND)))
                     item.setToolTip("新插入的动作")
                 self.table.setItem(index, column, item)
-        self.summary.setText(f"{len(self.entries)} 步 · {self.sequence.duration_us / 1_000_000:.2f} 秒")
+        timing = self.sequence.playback_timing
+        original, playback = self.sequence.duration_us / 1_000_000, timing.duration_us / 1_000_000
+        self.summary.setText(f"{original:.2f}→{playback:.2f} 秒" if self.sequence.movement_speed != 1
+                             else f"{len(self.entries)} 步 · {playback:.2f} 秒")
+        self.summary.setToolTip(f"{len(self.entries)} 步；原录制 {original:.3f} 秒 → 回放 {playback:.3f} 秒；缩短 {timing.saved_us / 1_000_000:.3f} 秒。步骤表保留原时间。")
+        self.speed.setEnabled(not self._previewing and self.sequence.pointer_mode == "screen")
         self.select_step()
         self.update_history()
 
@@ -287,9 +304,10 @@ class SequenceEditor(QDialog):
 
     def show_snapshot(self, sequence):
         self.sequence = sequence
-        with QSignalBlocker(self.name), QSignalBlocker(self.pointer):
+        with QSignalBlocker(self.name), QSignalBlocker(self.pointer), QSignalBlocker(self.speed):
             self.name.setText(sequence.name)
             self.pointer.setCurrentIndex(self.pointer.findData(sequence.pointer_mode))
+            self.speed.setCurrentIndex(self.speed.findData(sequence.movement_speed))
         self.error.clear()
         self.refresh()
 
@@ -372,7 +390,7 @@ class SequenceEditor(QDialog):
             return
         self._previewing = True
         self.capture.reject()
-        for field in (self.name, self.pointer, self.capture, self.insert, self.insert_duration, self.interval, self.count, self.save):
+        for field in (self.name, self.pointer, self.speed, self.capture, self.insert, self.insert_duration, self.interval, self.count, self.save):
             field.setDisabled(True)
         self.select_step()
         self.update_history()
@@ -400,6 +418,7 @@ class SequenceEditor(QDialog):
                 field.setEnabled(True)
             self.select_step()
             self.update_history()
+            self.speed.setEnabled(self.sequence.pointer_mode == "screen")
 
     def accept(self):
         if self._previewing:
