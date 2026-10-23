@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 MAX_EVENTS = 200_000
 MAX_TIME_US = 86_400_000_000
@@ -66,8 +66,14 @@ class RecordedSequence:
     screen_bounds: tuple[int, int, int, int] = (0, 0, 1920, 1080)
     original_events: tuple[RecordedEvent, ...] | None = None
     original_duration_us: int | None = None
+    movement_speed: float = 1.0
+    _playback_timing: object = field(default=None, init=False, repr=False, compare=False, hash=False)
 
     def validate(self):
+        from recording_playback import MOVEMENT_SPEEDS
+        if (not isinstance(self.movement_speed, (int, float)) or isinstance(self.movement_speed, bool)
+                or self.movement_speed not in MOVEMENT_SPEEDS):
+            raise ValueError("录制加速倍率错误")
         if not isinstance(self.name, str) or not self.name.strip() or len(self.name) > 200:
             raise ValueError("请填写录制名称")
         if self.pointer_mode not in ("screen", "relative"):
@@ -104,6 +110,8 @@ class RecordedSequence:
     def to_dict(self):
         result = {"name": self.name, "events": [event.to_dict() for event in self.events], "duration_us": self.duration_us,
                   "pointer_mode": self.pointer_mode, "screen_bounds": list(self.screen_bounds)}
+        if self.movement_speed != 1:
+            result["movement_speed"] = self.movement_speed
         if self.original_events is not None:
             result["original"] = {"events": [event.to_dict() for event in self.original_events],
                                   "duration_us": self.original_duration_us}
@@ -122,7 +130,14 @@ class RecordedSequence:
             original_duration = original.get("duration_us")
         return cls(raw.get("name", "录制"), tuple(RecordedEvent.from_dict(e) for e in raw["events"]),
                    raw.get("duration_us"), raw.get("pointer_mode", "screen"), tuple(raw.get("screen_bounds", ())),
-                   original_events, original_duration).validate()
+                   original_events, original_duration, raw.get("movement_speed", 1.0)).validate()
+
+    @property
+    def playback_timing(self):
+        if self._playback_timing is None:
+            from recording_playback import compile_timing
+            object.__setattr__(self, "_playback_timing", compile_timing(self))
+        return self._playback_timing
 
     @property
     def can_restore(self):

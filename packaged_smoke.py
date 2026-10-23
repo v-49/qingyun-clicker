@@ -38,6 +38,7 @@ def main():
         assert result['mixed_rules_checked'], result
         assert result['recording_delay_checked'], result
         assert result['recording_tail_checked'], result
+        assert result['recording_speed_checked'], result
         assert result['countdown_labels'] == ['3s', '2s', '1s', '停止录制'], result
         print('Standalone EXE startup verified:', json.dumps(result, ensure_ascii=True))
 

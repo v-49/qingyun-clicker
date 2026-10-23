@@ -1362,7 +1362,7 @@ class ActionRow(QFrame):
         self.sequence = sequence.validate()
         self.binding = None
         self.press_spin.setRange(0, 86_400_000)
-        self.press_spin.setValue(round(sequence.duration_us / 1000))
+        self.press_spin.setValue(round(sequence.playback_timing.duration_us / 1000))
         self.update_controls()
 
     def refresh_binding(self) -> None:
@@ -1405,7 +1405,10 @@ class ActionRow(QFrame):
         if self.sequence:
             self.interval_spin.setMinimum(0)
             self.press_spin.setRange(0, 86_400_000)
-            self.press_spin.setValue(round(self.sequence.duration_us / 1000))
+            self.press_spin.setValue(round(self.sequence.playback_timing.duration_us / 1000))
+            self.press_field.setToolTip(f"回放时长；原录制 {self.sequence.duration_us / 1000:g} ms，加速 {self.sequence.movement_speed:g}×。点击录制名称调整。")
+        else:
+            self.press_field.setToolTip("一次点按从按下到松开的持续时间")
         for label in self.press_field.findChildren(QLabel):
             if label.text() in ("持续", "时长"):
                 label.setText("时长" if self.sequence else "持续")
@@ -2366,6 +2369,32 @@ def main() -> int:
                     assert tail_editor.sequence == trimmed
                     tail_editor.reject()
                     assert recorded_row.sequence == trimmed
+                    speed_events = tuple(RecordedEvent(i * 50_000, "move", x=100 + i * 10, y=200)
+                                         for i in range(17)) + (
+                        RecordedEvent(900_000, "button", "left", True, 260, 200),
+                        RecordedEvent(980_000, "button", "left", False, 260, 200),
+                        RecordedEvent(1_600_000, "key", 0x57, True),
+                        RecordedEvent(1_650_000, "move", x=300, y=200),
+                        RecordedEvent(1_700_000, "move", x=350, y=200),
+                        RecordedEvent(1_800_000, "key", 0x57, False),
+                        RecordedEvent(1_900_000, "wheel", x=350, y=200, delta=120),
+                    )
+                    speed_sequence = RecordedSequence("录制 1", speed_events, 2_000_000, screen_bounds=desktop_bounds()).validate()
+                    recorded_row.apply_action_config(ActionConfig(None, "burst", 1000, repeat_count=1, sequence=speed_sequence))
+                    speed_editor = SequenceEditor(recorded_row, BindingCaptureButton, binding_display)
+                    speed_editor.show()
+                    app.processEvents()
+                    speed_geometry = speed_editor.size()
+                    speed_editor.speed.setCurrentIndex(speed_editor.speed.findData(2))
+                    app.processEvents()
+                    assert speed_editor.size() == speed_geometry
+                    assert speed_editor.sequence.events == speed_sequence.events
+                    assert speed_editor.sequence.playback_timing.duration_us == 1_600_000
+                    assert speed_editor.summary.text() == "2.00→1.60 秒"
+                    assert speed_editor.grab().save(str(report.with_name(report.stem + ".speed.png")))
+                    speed_editor.accept()
+                    assert recorded_row.press_spin.value() == 1600
+                    recorded_row.apply_action_config(ActionConfig(None, "burst", 1000, repeat_count=1, sequence=trimmed))
                     window.groups[0].add_action()
                     window.groups[0].actions[-1].apply_action_config(ActionConfig(InputBinding("keyboard", 0x43), "repeat", 150))
                     mixed_editor = ActionEditor(row)
@@ -2403,11 +2432,12 @@ def main() -> int:
                         assert len(window.active_group.actions) == action_count
                     finally:
                         globals()["NativeRecorder"] = recorder_type
-                    report.write_text(json.dumps({"ok": True, "platform": app.platformName(), "frozen": bool(getattr(sys, "frozen", False)), "version": app.applicationVersion(), "default_press_ms": window.groups[0].actions[0].press_spin.value(), "size": [window.width(), window.height()], "ready_perf_counter": ready_at, "mixed_rules_checked": True, "recording_delay_checked": True, "recording_tail_checked": True, "countdown_labels": countdown_labels }), encoding="utf-8")
+                    report.write_text(json.dumps({"ok": True, "platform": app.platformName(), "frozen": bool(getattr(sys, "frozen", False)), "version": app.applicationVersion(), "default_press_ms": window.groups[0].actions[0].press_spin.value(), "size": [window.width(), window.height()], "ready_perf_counter": ready_at, "mixed_rules_checked": True, "recording_delay_checked": True, "recording_tail_checked": True, "recording_speed_checked": True, "countdown_labels": countdown_labels }), encoding="utf-8")
                     window.close()
                     app.exit(0)
                 except Exception as exc:
-                    report.write_text(json.dumps({"ok": False, "error": str(exc)}), encoding="utf-8")
+                    import traceback
+                    report.write_text(json.dumps({"ok": False, "error": str(exc), "traceback": traceback.format_exc()}), encoding="utf-8")
                     app.exit(1)
 
             QTimer.singleShot(700, finish_smoke)

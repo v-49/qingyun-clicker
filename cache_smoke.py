@@ -9,6 +9,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 
@@ -33,7 +34,8 @@ def main():
             except subprocess.TimeoutExpired:
                 subprocess.run(['taskkill','/PID',str(process.pid),'/T','/F'],capture_output=True)
                 raise
-            assert code==0 and report.exists(),(name,code)
+            error=report.with_name(report.name+'.launcher-error.txt')
+            assert code==0 and report.exists(),(name,code,error.read_text(encoding='utf-8-sig') if error.exists() else 'No launcher error report')
             data=json.loads(report.read_text(encoding='utf-8'));assert data['ok']
             result={'case':name,'ready_ms':round((data['ready_perf_counter']-start)*1000,2)}
             results.append(result);print(result,flush=True)
@@ -60,10 +62,38 @@ def main():
         assert handle not in (None,ctypes.c_void_p(-1).value)
         try:finish(spawn('active-version-preserved'));assert old.exists()
         finally:kernel.CloseHandle(handle)
+        # A scanner-style directory handle denies renaming temporarily. The
+        # launcher must wait for its release rather than show a startup error.
+        shutil.rmtree(version)
+        locked=threading.Event()
+        stop_lock=threading.Event()
+        def hold_staging():
+            deadline=time.monotonic()+15
+            while not stop_lock.is_set() and time.monotonic()<deadline:
+                for stage in cache.glob('*.tmp.*'):
+                    handle=kernel.CreateFileW(str(stage),0x80000000,3,None,3,0x02000000,None)
+                    if handle not in (None,ctypes.c_void_p(-1).value):
+                        try:
+                            locked.set()
+                            stop_lock.wait(4)
+                        finally:kernel.CloseHandle(handle)
+                        return
+                stop_lock.wait(.005)
+        worker=threading.Thread(target=hold_staging)
+        worker.start()
+        try:
+            finish(spawn('busy-staging-retry'))
+            assert locked.is_set(),'Staging lock regression did not acquire its handle'
+        finally:
+            stop_lock.set();worker.join()
         # Force a fresh extraction in an isolated test cache, then launch twice simultaneously.
         shutil.rmtree(version)
         launches=[spawn('concurrent-1'),spawn('concurrent-2')]
-        for item in launches:finish(item)
+        failures=[]
+        for item in launches:
+            try:finish(item)
+            except Exception as exc:failures.append(exc)
+        if failures:raise failures[0]
         assert len(list(cache.glob('[0-9a-f]'*64)))==1
         assert (other/'note.txt').read_text()=='untouched'
         assert not list(cache.glob('*.tmp.*'))
